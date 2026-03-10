@@ -1,0 +1,66 @@
+#########################################################################
+# FSM PX4 Control Parameters #
+#########################################################################
+
+# 使用通配节点名，确保 fsmpx4_fsm_px4_1/2/3 等多实例都能加载同一套默认参数
+/**:
+  ros__parameters:
+    # 基础参数
+    ctrl_freq_max: 200.0
+    px4_ns: "" # 多机时填写 "/px4_1"、"/px4_2"...
+    manual_control_topic: false # true=use /<px4_ns>/fmu/out/manual_control_setpoint, false=use /rc/manual_control_setpoint or /<px4_ns>/rc/manual_control_setpoint
+
+    # 位置输入参数: 使用 /fmu/out/vehicle_global_position (px4_msgs/msg/VehicleGlobalPosition)
+    # 下面的经纬高会作为所有无人机共享的 NED 原点，请按实际起飞参考点填写。
+    "position.gps_origin_latitude_deg": 47.397742
+    "position.gps_origin_longitude_deg": 8.545594
+    "position.gps_origin_altitude_m": 488.0
+
+    # 自动起飞参数（仅在 OFFBOARD_STABILIZED -> HOVER 入口时触发）
+    "takeoff.enabled": true
+    "takeoff.idle_duration_s": 1.0
+    "takeoff.target_height_m": 2.0
+    "takeoff.ascent_velocity_m_s": 0.6
+    "takeoff.ascent_accel_m_s2": 1.0
+    "takeoff.timeout_s": 15.0
+
+    # 自动降落参数
+    "land.detected_ready_timeout_s": 2.0
+    "land.command_resend_interval_s": 0.2
+    "land.disarm_command_resend_interval_s": 0.2
+    "land.disarm_command_hold_s": 1.0
+
+    # CMD_CTRL 只接收外部 planner 的期望加速度，姿态/推力由 fsmpx4 内部映射
+    "command.timeout_s": 0.5
+    "command.acceleration_topic": ""
+
+    # VehicleCommand 源/目标ID
+    "vehicle_command.target_system_id": 1
+    "vehicle_command.target_component_id": 1
+    "vehicle_command.source_system_id": 1
+    "vehicle_command.source_component_id": 1
+
+    # 推力映射参数
+    "thr_map.hover_percentage": 0.71
+
+    # 控制器参数 - 位置控制增益
+    "control.Kp_x": 2.5
+    "control.Kp_y": 2.5
+    "control.Kp_z": 4.0
+    "control.Kv_x": 3.0
+    "control.Kv_y": 3.0
+    "control.Kv_z": 4.5
+    "control.Kvi_x": 0.02
+    "control.Kvi_y": 0.02
+    "control.Kvi_z": 0.1
+
+    # 控制器参数 - 物理参数
+    "control.mass": 2.0
+    "control.gravity": 9.81
+
+    # 控制器参数 - 控制限制
+    "control.max_thrust": -0.1 # 最大推力 (向上)
+    "control.min_thrust": -0.9 # 最小推力 (向下)
+
+    # 控制器参数 - 积分控制 (暂时关闭，先稳定基础控制)
+    "control.use_integral": false

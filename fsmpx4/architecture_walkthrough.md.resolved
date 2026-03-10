@@ -1,0 +1,372 @@
+# 多机吊挂控制框架 架构介绍
+
+## 1. 部署模型
+
+```
+┌────────────────── UAV-1 机载电脑 ──────────────────┐
+│  fsm_node (fsmpx4)     swarm_planner_node          │
+│  ├─ RC / IMU / GPS      ├─ 订阅 3 架 UAV 位姿       │
+│  ├─ 6-state FSM         ├─ 订阅 payload 位置         │
+│  └─ CMD_CTRL: 转发      └─ 输出: 本机 AttitudeSetpoint│
+│            ↑                         │              │
+│            └────── ROS 2 topic ──────┘              │
+└─────────────────────────────────────────────────────┘
+             (× 3 台, self_index = 0 / 1 / 2)
+```
+
+每架 UAV 的机载电脑运行 **同一份代码**，通过 `px4_ns` 和 `self_index` 参数区分身份。节点间通过 ROS 2 DDS 网络通信。
+
+---
+
+## 2. 包结构总览
+
+| 包名 | 职责 | 关键可执行文件 |
+|------|------|------------|
+| **fsmpx4** | 单机状态机 + PX4 通信 | `fsm_node` |
+| **swarm_planner** | 集群控制律 + 姿态映射 | `swarm_planner_node` |
+
+两个包**没有编译依赖**——`swarm_planner` 不 `#include` 任何 `fsmpx4` 头文件，仅通过 ROS 2 topic 通信。
+
+---
+
+## 3. fsmpx4 包详解
+
+### 3.1 文件地图
+
+```
+fsmpx4/
+├── include/
+│   ├── fsmpx4.h            ← FSMPX4 类声明（FSM 主节点）
+│   ├── control.h            ← PositionAttitudeController
+│   ├── input.h              ← RC_Receiver / IMU_Reader / Position_Reader
+│   ├── param_loader.h       ← FSMParams 结构体 + YAML 加载
+│   ├── types.h              ← UAVState / UAVCommand / ControlOutput
+│   ├── timed_data.h         ← TimedData<T> 时间戳包装器
+│   ├── geo_utils.h          ← GPS → NED 转换
+│   ├── fsm_contexts.h       ← TakeoffCtx / HoverCtx / LandCtx / CmdCtx
+│   └── takeoff_planner.h    ← 起飞轨迹梯形速度规划（纯函数）
+├── src/
+│   ├── fsmpx4.cpp           ← FSM 实现（700+ 行，核心文件）
+│   ├── control.cpp          ← 位置-姿态控制器
+│   ├── input.cpp            ← 传感器数据处理
+│   ├── param_loader.cpp     ← 参数声明 + 加载
+│   └── fsm_node.cpp         ← main() 入口
+├── config/                  ← YAML 参数文件
+├── launch/                  ← launch 文件
+└── msg/FSMDebug.msg         ← 调试消息定义
+```
+
+### 3.2 状态机（6 个状态）
+
+```mermaid
+stateDiagram-v2
+    [*] --> MANUAL_CTRL
+    MANUAL_CTRL --> OFFBOARD_STABILIZED : RC aux1 > 0.75
+
+    OFFBOARD_STABILIZED --> MANUAL_CTRL : fallback (RC/IMU 异常)
+    OFFBOARD_STABILIZED --> AUTO_TAKEOFF : enter_hover + landed
+    OFFBOARD_STABILIZED --> AUTO_HOVER : enter_hover + airborne
+
+    AUTO_TAKEOFF --> MANUAL_CTRL : fallback (RC/IMU/Pos 异常)
+    AUTO_TAKEOFF --> AUTO_HOVER : 到达目标高度 or 超时
+    AUTO_TAKEOFF --> OFFBOARD_STABILIZED : 退出 hover 档
+
+    AUTO_HOVER --> MANUAL_CTRL : fallback (RC/IMU/Pos 异常)
+    AUTO_HOVER --> OFFBOARD_STABILIZED : 退出 hover 档
+    AUTO_HOVER --> CMD_CTRL : is_command_mode + planner_fresh
+    AUTO_HOVER --> AUTO_LAND : land_request
+
+    CMD_CTRL --> MANUAL_CTRL : fallback (RC/IMU/Pos 异常)
+    CMD_CTRL --> AUTO_HOVER : RC 退出 command 档 or planner 超时
+
+    AUTO_LAND --> MANUAL_CTRL : fallback (RC/IMU 异常) or 降落完成
+```
+
+> [!IMPORTANT]
+> **CMD_CTRL 入口 guard**：必须同时满足 RC 处于 command 档（`is_command_mode`）**且** planner setpoint 新鲜（[fresh()](file:///home/ubuntu22/swarm_ws/src/fsmpx4/include/input.h#31-32)）才允许进入。这防止了"RC 已拨 command 但 planner 还没上线"时的模式抖动。
+
+### 3.3 各状态的执行逻辑
+
+| 状态 | [executeState()](file:///home/ubuntu22/swarm_ws/src/fsmpx4/src/fsmpx4.cpp#376-551) 做了什么 |
+|------|------------------------|
+| **MANUAL_CTRL** | 关闭 Offboard，什么都不发 |
+| **OFFBOARD_STABILIZED** | 开启 Offboard → 读取 RC 摇杆 → 计算 `Rd` + `thrust` → 发布给 PX4 |
+| **AUTO_TAKEOFF** | 梯形速度曲线生成位置指令 → `controller_.computeControl()` → 发布 |
+| **AUTO_HOVER** | 锁定当前 hover 点 → `controller_.computeControl()` → 发布 |
+| **CMD_CTRL** | **直接转发** `planner_setpoint_`（thrust clamp + 时间戳重写）→ 发布 |
+| **AUTO_LAND** | 发送 PX4 Land 命令 → 等待落地 → 发送 Disarm 命令 |
+
+### 3.4 PositionAttitudeController（[control.cpp](file:///home/ubuntu22/swarm_ws/src/fsmpx4/src/control.cpp)）
+
+用于 **AUTO_TAKEOFF** 和 **AUTO_HOVER** 状态：
+
+```
+               期望加速度 A
+    eX, eV ──→ A = -Kp·eX - Kv·eV - Kvi·∫eX - mg·e₃ + m·a_d
+                    │
+               computeFromA()
+                    │
+       ┌────────────┴────────────┐
+       │  b₃ = -A/‖A‖           │  ← 机体z轴=推力反方向
+       │  b₁ = yaw投影到b₃正交面  │  ← 确定滚转/偏航
+       │  Rd = [b₁ b₂ b₃]       │  ← 期望旋转矩阵
+       │  thrust = ‖A‖/(mg)·h_t │  ← 归一化推力
+       └─────────────────────────┘
+```
+
+> [!NOTE]
+> **CMD_CTRL 不使用此控制器**——planner 已经完成了从加速度到姿态的映射，FSM 只做转发。
+
+### 3.5 输入模块（[input.cpp](file:///home/ubuntu22/swarm_ws/src/fsmpx4/src/input.cpp)）
+
+| 模块 | 订阅的 PX4 topic | 写入的数据 |
+|------|-----------------|----------|
+| [RC_Receiver](file:///home/ubuntu22/swarm_ws/src/fsmpx4/src/input.cpp#14-19) | `ManualControlSetpoint` | 摇杆通道 ch[0-3]、模式/档位标志、边沿检测 |
+| [IMU_Reader](file:///home/ubuntu22/swarm_ws/src/fsmpx4/include/input.h#77-78) | `VehicleAttitude` + `VehicleAngularVelocity` | `current_state_->rotation` + `angular_velocity` |
+| [Position_Reader](file:///home/ubuntu22/swarm_ws/src/fsmpx4/include/input.h#92-93) | `VehicleGlobalPosition`(x/y) + `VehicleLocalPosition`(EKF2 z, velocity) | `current_state_->position` + [velocity](file:///home/ubuntu22/swarm_ws/src/fsmpx4/include/input.h#104-105) |
+
+三个模块通过**引用注入**共享同一个 [UAVState](file:///home/ubuntu22/swarm_ws/src/fsmpx4/include/types.h#31-38)，在回调中直接写入。
+
+### 3.6 fsmpx4 Topic 拓扑
+
+```
+PX4 FMU 发布:                        fsmpx4 发布:
+  /<ns>/fmu/out/manual_control  ──→  rc_sub_
+  /<ns>/fmu/out/vehicle_attitude ─→  attitude_sub_
+  /<ns>/fmu/out/vehicle_angular  ─→  angular_vel_sub_
+  /<ns>/fmu/out/vehicle_global   ─→  gps_pos_sub_
+  /<ns>/fmu/out/vehicle_local    ─→  local_pos_sub_
+  /<ns>/fmu/out/vehicle_land     ─→  land_detected_sub_
+
+swarm_planner 发布:                        → PX4 FMU 接收:
+  /<ns>/planner/vehicle_attitude_setpoint   /<ns>/fmu/in/vehicle_attitude_setpoint
+  ──→ planner_setpoint_sub_                   ←── attitude_pub_
+```
+
+---
+
+## 4. swarm_planner 包详解
+
+### 4.1 文件地图
+
+```
+swarm_planner/
+├── include/swarm_planner/
+│   ├── swarm_planner_node.h       ← ROS 节点
+│   ├── swarm_planner_core.h       ← 控制律核心（纯计算）
+│   ├── swarm_state_aggregator.h   ← 多机状态聚合
+│   ├── attitude_thrust_mapper.h   ← 加速度 → 姿态/油门（header-only）
+│   ├── types.h                    ← TimedData, SwarmPeerKinematics 等
+│   └── geo_utils.h                ← GPS → NED（独立副本）
+├── src/
+│   ├── swarm_planner_node.cpp     ← 节点实现
+│   ├── swarm_planner_core.cpp     ← 控制律实现（300 行）
+│   ├── swarm_state_aggregator.cpp ← 状态聚合实现
+│   └── main.cpp                   ← 入口
+├── config/planner.yaml            ← 参数
+├── launch/swarm_planner.launch.py
+└── test/                          ← 单元测试
+```
+
+### 4.2 模块职责
+
+```mermaid
+graph LR
+    subgraph "swarm_planner_node (每架 UAV 一个)"
+        AGG["SwarmStateAggregator<br/>收集 3 机 + 载荷位姿"]
+        CORE["SwarmPlannerCore<br/>弹簧-阻尼网络 + CFO"]
+        MAP["attitude_thrust_mapper<br/>a_des → qd + thrust"]
+    end
+    
+    PX4_1["UAV-1 PX4"] -->|global_pos / local_pos| AGG
+    PX4_2["UAV-2 PX4"] -->|global_pos / local_pos| AGG
+    PX4_3["UAV-3 PX4"] -->|global_pos / local_pos| AGG
+    PAYLOAD["载荷位置"] -->|PointStamped| AGG
+    
+    AGG -->|SwarmVirtualNetwork| CORE
+    CORE -->|desired_acceleration| MAP
+    MAP -->|VehicleAttitudeSetpoint| FSM["本机 fsmpx4<br/>CMD_CTRL"]
+```
+
+### 4.3 SwarmStateAggregator（[swarm_state_aggregator.cpp](file:///home/ubuntu22/swarm_ws/src/swarm_planner/src/swarm_state_aggregator.cpp)）
+
+**职责**：将分散的 ROS topic 汇聚为统一的 [SwarmVirtualNetwork](file:///home/ubuntu22/swarm_ws/src/swarm_planner/include/swarm_planner/types.h#57-64)。
+
+1. **GPS 原点锁定**：以 UAV-1（`idx==0`）的首条 `VehicleGlobalPosition` 为原点，后续所有 UAV 位置都转为 NED。
+2. **位姿存储**：`peer_positions_[3]` + `peer_velocities_[3]` + `payload_position_`，全部带时间戳。
+3. **超时检查**：[getSnapshot()](file:///home/ubuntu22/swarm_ws/src/swarm_planner/src/swarm_state_aggregator.cpp#63-106) 中检查每个 peer 和 payload 是否 fresh，任一超时则返回 false → 不输出控制。
+4. **虚拟网络生成**：[getVirtualNetwork()](file:///home/ubuntu22/swarm_ws/src/swarm_planner/src/swarm_state_aggregator.cpp#107-140) 除了 3 个 UAV 节点外，还计算 **中心点** u（3 机平均）和 **载荷** l，共 5 个节点。
+5. **载荷速度估计**：差分 + 低通滤波（`payload_vel_lpf_alpha`），带最大速度 clamp。
+
+### 4.4 SwarmPlannerCore（[swarm_planner_core.cpp](file:///home/ubuntu22/swarm_ws/src/swarm_planner/src/swarm_planner_core.cpp)）
+
+**这是整个系统的控制律核心**，对应 [swarm_controller_spec.md](file:///home/ubuntu22/swarm_ws/src/fsmpx4/docs/swarm_controller_spec.md)。
+
+#### 4.4.1 5-节点虚拟弹簧-阻尼网络
+
+```
+       UAV-1 (q₀)
+      / |       \
+     /  |  spring \
+    /   |    +     \
+UAV-2  |  damping  UAV-3
+  (q₁) |  +friction  (q₂)
+    \   |        /
+     \  |       /
+     Center (q₃ = payload + h_u·e₃)
+        |
+     Payload (q₄)
+```
+
+- **投影到虚拟平面**：每个 UAV 的真实位置 `p_i` 被投影到载荷上方 `h_u` 的水平面上，得到虚拟节点 `q_i`
+- **弹簧力** `F_s`：`k · (1 - l₀/l_ij) · (q_i - q_j)` — 保持结构形状
+- **阻尼力** `F_d`：`c₁ · (v_i - v_j)` — 抑制相对振动
+- **摩擦力** `F_f`：`c₂ · v_i` — 全局减速
+
+#### 4.4.2 速度 PID
+
+```
+u_i = -Kp·v_i - Ki·∫v_i·dt - Kd·(dv_i/dt)
+```
+
+对虚拟节点速度做 PID，提供额外的收敛力。
+
+#### 4.4.3 载荷跟踪
+
+```
+a_ref = -Kp_payload · (p_L - p_target) - Kv_payload · v_L
+```
+
+载荷位置误差产生参考加速度，引导编队向目标移动。
+
+#### 4.4.4 混合输出
+
+```
+a_des = a_ref + β_i · (a_formation - a_ref)
+```
+
+`β_i` 与 UAV 到载荷的垂直距离成正比——UAV 越高，编队力权重越大；越低（接近载荷），跟踪力主导。
+
+#### 4.4.5 CFO（Cable Force Observer）
+
+可选的扰动观测器，用于估计和补偿缆绳张力：
+
+```
+ê_v += dt · (u_∥ + d̂_∥ + l₁·e)        // 速度估计
+d̂_∥ += dt · l₂ · sat(e/φ)             // 扰动估计
+τ   = clamp(-m·d̂_∥, 0, f_max)         // 补偿力
+a_cfo = τ·(-t̂) / m                     // 沿缆绳方向补偿
+```
+
+> [!TIP]
+> CFO 默认关闭（`cfo.enable: false`）。在真实飞行中打开它有助于抵消缆绳张力引起的位置偏移。
+
+### 4.5 attitude_thrust_mapper（[attitude_thrust_mapper.h](file:///home/ubuntu22/swarm_ws/src/swarm_planner/include/swarm_planner/attitude_thrust_mapper.h)）
+
+```
+输入: desired_acceleration (NED), yaw, mass, gravity, hover_thrust
+输出: quaternion + normalized_thrust
+
+步骤:
+  1. A = -mg·e₃ + m·a_des          (合力向量)
+  2. b₃ = -A/‖A‖                    (推力方向 = 机体z轴)
+  3. b₁ = yaw方向投影到⊥b₃平面       (机体x轴)
+  4. Rd = [b₁, b₃×b₁, b₃]          (期望旋转矩阵)
+  5. thrust = -‖A‖/(mg) · h_hover   (归一化推力, PX4负=上)
+```
+
+> [!NOTE]
+> 退化路径保护：当 `‖A‖ < 1e-6`（自由落体/零重力），使用 `fallback_quaternion`（上一帧姿态），避免突跳到单位四元数。
+
+---
+
+## 5. 完整数据流（单帧，以 UAV-1 为例）
+
+```
+时间线 ──────────────────────────────────────────────────→
+
+1. PX4 FMU 发布传感器数据
+   ├── /px4_1/fmu/out/vehicle_attitude         ──→ fsmpx4 IMU_Reader
+   ├── /px4_1/fmu/out/vehicle_global_position  ──→ fsmpx4 Position_Reader
+   │                                            ──→ swarm_planner Aggregator
+   ├── /px4_2/fmu/out/vehicle_global_position  ──→ swarm_planner Aggregator
+   ├── /px4_3/fmu/out/vehicle_global_position  ──→ swarm_planner Aggregator
+   └── /payload/position                       ──→ swarm_planner Aggregator
+
+2. swarm_planner 定时器触发 (50 Hz)
+   ├── Aggregator.getVirtualNetwork()    → 检查超时 → 构建 5 节点网络
+   ├── Core.compute(input, output)       → 弹簧/阻尼/PID/CFO → desired_acceleration
+   ├── mapAccelerationToAttitudeThrust() → qd + thrust
+   └── publish → /px4_1/planner/vehicle_attitude_setpoint
+
+3. fsmpx4 控制回路 (200 Hz)
+   ├── process()
+   │   ├── checkTransitions()
+   │   │   └── AUTO_HOVER: is_command_mode && planner_fresh → CMD_CTRL
+   │   └── executeState()
+   │       └── CMD_CTRL: clamp thrust → 重写时间戳 → publish
+   └── /px4_1/fmu/in/vehicle_attitude_setpoint → PX4 混控器 → 电机
+```
+
+---
+
+## 6. 配置体系
+
+### 6.1 fsmpx4 参数（[config/fsmpx4.yaml](file:///home/ubuntu22/swarm_ws/src/fsmpx4/config)）
+
+| 参数组 | 关键参数 | 说明 |
+|--------|---------|------|
+| `basic` | `px4_ns`, `ctrl_freq_max` | 命名空间、主回路频率 |
+| `control` | `Kp_*`, `Kv_*`, `mass`, `gravity` | 位置-姿态控制器增益（仅 hover/takeoff 用） |
+| `thr_map` | `hover_percentage` | 悬停油门百分比 |
+| `command` | `timeout_s`, `attitude_setpoint_topic` | CMD_CTRL 超时 + planner topic |
+| `takeoff` | `target_height_m`, `ascent_velocity_m_s` | 自动起飞目标高度、速度 |
+
+### 6.2 swarm_planner 参数（[config/planner.yaml](file:///home/ubuntu22/swarm_ws/src/swarm_planner/config/planner.yaml)）
+
+| 参数 | 说明 |
+|------|------|
+| `self_index` | 本机在编队中的编号 (0/1/2) |
+| `mass`, `gravity`, `hover_thrust` | 物理参数（仅 planner 需要） |
+| `spring_k`, `damping_c1`, `friction_c2` | 弹簧-阻尼网络增益 |
+| `vel_pid_kp/ki/kd` | 虚拟节点速度 PID |
+| `payload_kp/kv` | 载荷位置跟踪增益 |
+| `cfo.*` | CFO 观测器参数 |
+| `peer_namespaces` | 所有 UAV 的 ROS 命名空间列表 |
+| `compute_hz` | 控制律计算频率 |
+
+> [!IMPORTANT]
+> `mass` / `gravity` / `hover_thrust` 只在 `swarm_planner` 中配置。`fsmpx4` 的 `CMD_CTRL` 状态**不需要知道**这些物理参数——它只做转发。
+
+---
+
+## 7. Launch 体系
+
+### 单机启动
+
+```bash
+ros2 launch fsmpx4 fsmpx4_fsm.launch.py px4_ns:=/px4_1
+```
+
+### 3机编队启动
+
+```bash
+ros2 launch fsmpx4 fsmpx4_swarm_3.launch.py
+```
+
+此 launch 文件为 3 架 UAV 分别启动 `fsm_node` + `swarm_planner_node`，并传入各自的 `px4_ns`、`self_index`、`target_system_id`。
+
+---
+
+## 8. 安全机制汇总
+
+| 机制 | 位置 | 作用 |
+|------|------|------|
+| **RC fallback** | [checkTransitions()](file:///home/ubuntu22/swarm_ws/src/fsmpx4/src/fsmpx4.cpp#266-371) 每状态 | RC 信号丢失 → 立即退回 MANUAL_CTRL |
+| **Planner 超时** | `CMD_CTRL → AUTO_HOVER` | setpoint 超过 `command.timeout_s` 未更新 → 退出 CMD_CTRL |
+| **Planner 入口 guard** | `AUTO_HOVER → CMD_CTRL` | 必须 planner_fresh 才允许进入 |
+| **Thrust clamp** | [publishPlannerSetpoint()](file:///home/ubuntu22/swarm_ws/src/fsmpx4/src/fsmpx4.cpp#666-680) | 油门限制在 `[min_thrust, max_thrust]` |
+| **NaN/Inf 检查** | mapper + core + controller | 任何非有限值 → 输出 invalid，不发布 |
+| **Peer 超时** | `SwarmStateAggregator::getSnapshot()` | 任一 UAV 位姿超时 → 不输出控制律 |
+| **加速度裁剪** | `SwarmPlannerCore::compute()` | [clipNorm(a_des, acc_norm_limit)](file:///home/ubuntu22/swarm_ws/src/swarm_planner/src/swarm_planner_core.cpp#69-89) |
+| **退化姿态** | `fallback_quaternion` | 零推力时保持上一帧姿态 |
