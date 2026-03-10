@@ -1,0 +1,50 @@
+/**:
+  ros__parameters:
+    px4_ns: ""
+    self_index: -1
+    output_topic: ""
+
+    mass: 2.0
+    gravity: 9.81
+    compute_hz: 200.0
+
+    target_x_m: 0.0
+    target_y_m: 0.0
+    target_z_m: -2.0
+
+    swarm_origin.latitude_deg: 47.397742
+    swarm_origin.longitude_deg: 8.545594
+    swarm_origin.altitude_m: 488.0
+
+    payload_navsat_topic: "/payload/navsat"
+    peer_timeout_s: 0.5
+    payload_timeout_s: 0.5
+    payload_vel_lpf_alpha: 0.7
+    payload_vel_max_m_s: 5.0
+
+    h_u_m: 1.0
+    spring_k: 1.2
+    damping_c1: 0.8
+    friction_c2: 0.3
+    vel_pid_kp: 1.0
+    vel_pid_ki: 0.0
+    vel_pid_kd: 0.2
+    payload_kp: 1.2
+    acc_norm_limit_m_s2: 6.0
+    dt_min_s: 0.001
+    dt_max_s: 0.2
+    integral_limit: 2.0
+    epsilon: 1.0e-4
+    # Reference-length matrix is row-major for nodes [1,2,3,u,l].
+    structure_reference.rest_lengths:
+      [0.00, 0.98, 1.01, 0.55, 1.14,
+       0.98, 0.00, 1.03, 0.60, 1.17,
+       1.01, 1.03, 0.00, 0.59, 1.16,
+       0.55, 0.60, 0.59, 0.00, 1.00,
+       1.14, 1.17, 1.16, 1.00, 0.00]
+    cfo.enable: false
+    cfo.l1: 8.0
+    cfo.l2: 20.0
+    cfo.phi: 0.2
+    cfo.fmax_n: 8.0
+    cfo.l_min_m: 0.2

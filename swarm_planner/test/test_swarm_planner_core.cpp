@@ -1,0 +1,162 @@
+#include <cmath>
+
+#include <gtest/gtest.h>
+
+#include "swarm_planner/swarm_planner_core.h"
+
+namespace {
+
+swarm_planner::control::SwarmPlannerCore::Input makeInput()
+{
+    swarm_planner::control::SwarmPlannerCore::Input input;
+    input.uav_positions_ned[0] = swarm_planner::Vector3(-1.0, 0.0, -1.0);
+    input.uav_positions_ned[1] = swarm_planner::Vector3(1.0, 0.0, -1.0);
+    input.uav_positions_ned[2] = swarm_planner::Vector3(0.0, 1.0, -1.0);
+    input.uav_velocities_ned[0] = swarm_planner::Vector3::Zero();
+    input.uav_velocities_ned[1] = swarm_planner::Vector3::Zero();
+    input.uav_velocities_ned[2] = swarm_planner::Vector3::Zero();
+    input.payload_position_ned = swarm_planner::Vector3::Zero();
+    input.payload_velocity_ned = swarm_planner::Vector3::Zero();
+    input.payload_target_ned = swarm_planner::Vector3(0.0, 0.0, -2.0);
+    input.previous_thrust_vector = swarm_planner::Vector3::Zero();
+    input.self_index = 0;
+    input.mass = 2.0;
+    input.dt = 0.01;
+    return input;
+}
+
+swarm_planner::control::SwarmPlannerCore::Config makeConfig()
+{
+    swarm_planner::control::SwarmPlannerCore::Config cfg;
+    cfg.rest_lengths_override = {
+        0.0, 0.98, 1.01, 0.55, 1.14,
+        0.98, 0.0, 1.03, 0.60, 1.17,
+        1.01, 1.03, 0.0, 0.59, 1.16,
+        0.55, 0.60, 0.59, 0.0, 1.0,
+        1.14, 1.17, 1.16, 1.0, 0.0};
+    return cfg;
+}
+
+bool finiteVector(const swarm_planner::Vector3& v)
+{
+    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+}
+
+}  // namespace
+
+TEST(SwarmPlannerCoreTest, RejectsInvalidConfig)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.h_u_m = 0.0;
+    EXPECT_FALSE(core.initialize(cfg));
+}
+
+TEST(SwarmPlannerCoreTest, RequiresConfiguredRestLengthsReference)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    swarm_planner::control::SwarmPlannerCore::Config cfg;
+    EXPECT_FALSE(core.initialize(cfg));
+}
+
+TEST(SwarmPlannerCoreTest, ProducesFiniteAccelerationAndUsesConfiguredStructure)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_TRUE(output.valid);
+    EXPECT_TRUE(core.structureLocked());
+    EXPECT_TRUE(finiteVector(output.desired_acceleration));
+}
+
+TEST(SwarmPlannerCoreTest, ResetPreservesConfiguredStructureReference)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    core.reset();
+
+    EXPECT_TRUE(core.initialized());
+    EXPECT_TRUE(core.structureLocked());
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_TRUE(output.valid);
+}
+
+TEST(SwarmPlannerCoreTest, UsesConfiguredRestLengthsOverrideWhenProvided)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.rest_lengths_override = {
+        0.0, 3.0, 4.0, 5.0, 6.0,
+        3.0, 0.0, 7.0, 8.0, 9.0,
+        4.0, 7.0, 0.0, 10.0, 11.0,
+        5.0, 8.0, 10.0, 0.0, 1.0,
+        6.0, 9.0, 11.0, 1.0, 0.0};
+    ASSERT_TRUE(core.initialize(cfg));
+    EXPECT_TRUE(core.structureLocked());
+
+    auto input = makeInput();
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_DOUBLE_EQ(output.debug.rest_lengths[1], 3.0);
+    EXPECT_DOUBLE_EQ(output.debug.rest_lengths[9], 9.0);
+    EXPECT_DOUBLE_EQ(output.debug.rest_lengths[19], 1.0);
+}
+
+TEST(SwarmPlannerCoreTest, RejectsMalformedRestLengthsOverride)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.rest_lengths_override = {0.0, 1.0, 2.0};
+    EXPECT_FALSE(core.initialize(cfg));
+}
+
+TEST(SwarmPlannerCoreTest, CFOOffKeepsUsedFlagFalse)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.cfo.enable = false;
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_FALSE(output.used_cfo);
+}
+
+TEST(SwarmPlannerCoreTest, CFOOnWithInvalidDtDoesNotApplyCompensation)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.cfo.enable = true;
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    input.dt = 1.0;
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_TRUE(output.valid);
+    EXPECT_FALSE(output.used_cfo);
+}
+
+TEST(SwarmPlannerCoreTest, AppliesAccelerationNormLimit)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.acc_norm_limit_m_s2 = 0.5;
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    input.payload_target_ned = swarm_planner::Vector3(100.0, 100.0, -50.0);
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_LE(output.desired_acceleration.norm(), cfg.acc_norm_limit_m_s2 + 1e-6);
+}
