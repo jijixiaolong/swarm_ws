@@ -263,15 +263,12 @@ Vector3 SwarmPlannerCore::computePassiveNetworkForce(
 }
 
 Vector3 SwarmPlannerCore::computeTrackingInput(
-    const Input& input,
     const Vector3& qdot_i,
     const double mass,
-    const double dt)
+    const double dt,
+    const Vector3& desired_payload_velocity,
+    const Vector3& desired_payload_acceleration)
 {
-    const Vector3 desired_payload_velocity =
-        -cfg_.payload_kp * (input.payload_position_ned - input.payload_target_ned);
-    const Vector3 desired_payload_acceleration =
-        -cfg_.payload_kp * input.payload_velocity_ned;
     const Vector3 velocity_error = qdot_i - desired_payload_velocity;
 
     Vector3 velocity_error_derivative = Vector3::Zero();
@@ -377,13 +374,25 @@ bool SwarmPlannerCore::compute(const Input& input, Output& output)
     // 组合当前无人机的局部控制律：虚拟弹簧阻尼网络的被动耦合项，加上载荷定点跟踪项。
     const int i = input.self_index;
     const Vector3 passive_force = computePassiveNetworkForce(i, state, eps);
-    const Vector3 u_i = computeTrackingInput(input, state.qdot[i], mass, dt);
+    const Vector3 desired_payload_velocity =
+        -cfg_.payload_kp * (input.payload_position_ned - input.payload_target_ned);
+    const Vector3 desired_payload_acceleration =
+        -cfg_.payload_kp * input.payload_velocity_ned;
+    const Vector3 u_i = computeTrackingInput(
+        state.qdot[i],
+        mass,
+        dt,
+        desired_payload_velocity,
+        desired_payload_acceleration);
 
     // qdd_i 表示第 i 个虚拟节点的期望加速度，由被动网络稳定项和定点跟踪输入共同组成。
     const Vector3 qdd_i = -passive_force / mass + u_i / mass;
 
-    // 将虚拟节点加速度映射回真实无人机加速度，并按需叠加 CFO 的绳索方向扰动补偿。
-    const Vector3 a_id = state.beta[i] * qdd_i;
+    // 文档中的映射是 a_i = qdd_l + beta * (qdd_i - qdd_l)。
+    // 点保持场景下，qdd_l 由外环位置伺服生成的 payload 期望加速度给出；
+    // 这样不会把所有无人机共享的载荷平移加速度错误放大为 beta 倍。
+    const Vector3 qdd_l = desired_payload_acceleration;
+    const Vector3 a_id = qdd_l + state.beta[i] * (qdd_i - qdd_l);
     const CfoResult cfo = computeCfoAcceleration(input, eps, mass, dt_valid_for_update);
 
     // 输出前先做限幅，并拒绝任何非有限结果，确保下游只接收到安全的加速度指令。

@@ -147,6 +147,39 @@ TEST(SwarmPlannerCoreTest, CFOOnWithInvalidDtDoesNotApplyCompensation)
     EXPECT_FALSE(output.used_cfo);
 }
 
+TEST(SwarmPlannerCoreTest, MappingDoesNotScaleCommonPayloadAccelerationByBeta)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.spring_k = 0.0;
+    cfg.damping_c1 = 0.0;
+    cfg.friction_c2 = 0.0;
+    cfg.vel_pid_kp = 0.0;
+    cfg.vel_pid_ki = 0.0;
+    cfg.vel_pid_kd = 0.0;
+    cfg.payload_kp = 1.2;
+    cfg.acc_norm_limit_m_s2 = 10.0;
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    input.payload_position_ned = swarm_planner::Vector3::Zero();
+    input.payload_target_ned = swarm_planner::Vector3::Zero();
+    input.payload_velocity_ned = swarm_planner::Vector3(0.5, -0.25, 0.1);
+    input.uav_positions_ned[0] = swarm_planner::Vector3(0.0, 0.0, -1.5);
+    input.uav_positions_ned[1] = swarm_planner::Vector3(0.4, 0.0, -1.5);
+    input.uav_positions_ned[2] = swarm_planner::Vector3(-0.2, 0.3, -1.5);
+
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    ASSERT_TRUE(output.valid);
+
+    const swarm_planner::Vector3 expected =
+        -cfg.payload_kp * input.payload_velocity_ned;
+    EXPECT_NEAR(output.desired_acceleration.x(), expected.x(), 1e-6);
+    EXPECT_NEAR(output.desired_acceleration.y(), expected.y(), 1e-6);
+    EXPECT_NEAR(output.desired_acceleration.z(), expected.z(), 1e-6);
+}
+
 TEST(SwarmPlannerCoreTest, AppliesAccelerationNormLimit)
 {
     swarm_planner::control::SwarmPlannerCore core;

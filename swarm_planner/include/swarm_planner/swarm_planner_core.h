@@ -141,10 +141,11 @@ private:
     VirtualState buildVirtualState(const Input& input, double eps, double h_u) const;
     Vector3 computePassiveNetworkForce(int self_index, const VirtualState& state, double eps) const;
     Vector3 computeTrackingInput(
-        const Input& input,
         const Vector3& qdot_i,
         double mass,
-        double dt);
+        double dt,
+        const Vector3& desired_payload_velocity,
+        const Vector3& desired_payload_acceleration);
     CfoResult computeCfoAcceleration(
         const Input& input,
         double eps,

@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""
+Live analyzer for swarm_planner/msg/SwarmPlannerDebug.
+
+Typical usage:
+  ros2 run swarm_planner analyze_swarm_debug --once
+  ros2 run swarm_planner analyze_swarm_debug --interval 1.0
+"""
+
+import argparse
+import math
+import sys
+import time
+from typing import Iterable, List, Sequence, Tuple
+
+import rclpy
+from rclpy.executors import ExternalShutdownException
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.utilities import remove_ros_args
+
+from swarm_planner.msg import SwarmPlannerDebug
+
+
+Vector3Tuple = Tuple[float, float, float]
+Pair = Tuple[int, int]
+
+PAIR_INDICES: Tuple[Pair, ...] = ((0, 1), (0, 2), (1, 2))
+NUM_UAVS = 3
+NODE_U = 3
+NODE_L = 4
+EPS = 1e-9
+
+
+def vec3_to_tuple(msg) -> Vector3Tuple:
+    return (float(msg.x), float(msg.y), float(msg.z))
+
+
+def sub(a: Vector3Tuple, b: Vector3Tuple) -> Vector3Tuple:
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def dot_xy(a: Vector3Tuple, b: Vector3Tuple) -> float:
+    return a[0] * b[0] + a[1] * b[1]
+
+
+def norm(v: Vector3Tuple) -> float:
+    return math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+
+
+def norm_xy(v: Vector3Tuple) -> float:
+    return math.hypot(v[0], v[1])
+
+
+def dist(a: Vector3Tuple, b: Vector3Tuple) -> float:
+    return norm(sub(a, b))
+
+
+def unit_xy(v: Vector3Tuple) -> Tuple[float, float]:
+    n = norm_xy(v)
+    if n < EPS:
+        return (0.0, 0.0)
+    return (v[0] / n, v[1] / n)
+
+
+def fmt_vec_xy(v: Vector3Tuple) -> str:
+    return f"({v[0]:+.3f}, {v[1]:+.3f})"
+
+
+def rest_matrix(flat_values: Sequence[float]) -> List[List[float]]:
+    side = int(round(math.sqrt(len(flat_values))))
+    return [
+        [float(flat_values[row * side + col]) for col in range(side)]
+        for row in range(side)
+    ]
+
+
+def mean(values: Iterable[float]) -> float:
+    values = list(values)
+    if not values:
+        return 0.0
+    return sum(values) / float(len(values))
+
+
+def command_direction_label(radial_acc: float) -> str:
+    if radial_acc > 0.05:
+        return "outward"
+    if radial_acc < -0.05:
+        return "inward"
+    return "neutral"
+
+
+def render_report(msg: SwarmPlannerDebug) -> str:
+    payload_pos = vec3_to_tuple(msg.payload_position_ned)
+    payload_vel = vec3_to_tuple(msg.payload_velocity_ned)
+    payload_target = vec3_to_tuple(msg.payload_target_ned)
+    passive_force = vec3_to_tuple(msg.passive_force)
+    tracking_input = vec3_to_tuple(msg.tracking_input)
+    desired_acc = vec3_to_tuple(msg.desired_acceleration)
+
+    uav_positions = [vec3_to_tuple(item) for item in msg.uav_positions_ned]
+    uav_velocities = [vec3_to_tuple(item) for item in msg.uav_velocities_ned]
+    virtual_positions = [vec3_to_tuple(item) for item in msg.virtual_positions_ned]
+    rest_lengths = rest_matrix(msg.rest_lengths)
+
+    payload_error = sub(payload_pos, payload_target)
+    payload_speed = norm(payload_vel)
+    h_u = dist(virtual_positions[NODE_U], virtual_positions[NODE_L])
+
+    lines = [
+        (
+            f"[swarm_debug] stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d} "
+            f"self={msg.self_index} valid={msg.valid} structure_locked={msg.structure_locked} "
+            f"dt={msg.dt_used:.4f}s"
+        ),
+        (
+            f"payload error={norm(payload_error):.3f} m "
+            f"xy={fmt_vec_xy(payload_error)} z={payload_error[2]:+.3f} "
+            f"speed={payload_speed:.3f} m/s"
+        ),
+    ]
+
+    real_shortfalls = []
+    virtual_shortfalls = []
+    lines.append("real uav distances:")
+    for i, j in PAIR_INDICES:
+        actual = dist(uav_positions[i], uav_positions[j])
+        ref = rest_lengths[i][j]
+        delta = actual - ref
+        real_shortfalls.append(ref - actual)
+        lines.append(
+            f"  {i}-{j}: {actual:.3f} m (ref {ref:.2f}, delta {delta:+.3f})"
+        )
+
+    lines.append("virtual node distances:")
+    for i, j in PAIR_INDICES:
+        actual = dist(virtual_positions[i], virtual_positions[j])
+        ref = rest_lengths[i][j]
+        delta = actual - ref
+        virtual_shortfalls.append(ref - actual)
+        lines.append(
+            f"  q{i}-q{j}: {actual:.3f} m (ref {ref:.2f}, delta {delta:+.3f})"
+        )
+
+    lines.append(
+        f"mean shortfall: real={mean(real_shortfalls):.3f} m "
+        f"virtual={mean(virtual_shortfalls):.3f} m"
+    )
+
+    lines.append("payload links / spreading:")
+    for i in range(NUM_UAVS):
+        real_rel = sub(uav_positions[i], payload_pos)
+        real_horiz = norm_xy(real_rel)
+        real_angle = math.degrees(math.atan2(real_horiz, abs(real_rel[2])))
+        target_angle = math.degrees(math.atan2(rest_lengths[i][NODE_U], max(h_u, EPS)))
+
+        q_to_u = dist(virtual_positions[i], virtual_positions[NODE_U])
+        q_to_l = dist(virtual_positions[i], virtual_positions[NODE_L])
+
+        relative_velocity = sub(uav_velocities[i], payload_vel)
+        radial_dir = unit_xy(real_rel)
+        radial_velocity = (
+            relative_velocity[0] * radial_dir[0] + relative_velocity[1] * radial_dir[1]
+        )
+        tangential_velocity = (
+            -relative_velocity[0] * radial_dir[1] + relative_velocity[1] * radial_dir[0]
+        )
+
+        lines.append(
+            f"  uav{i}: horiz={real_horiz:.3f} m angle={real_angle:.1f} deg "
+            f"(target {target_angle:.1f}) radial_v={radial_velocity:+.3f} "
+            f"tan_v={tangential_velocity:+.3f} q{i}-u={q_to_u:.3f} "
+            f"(ref {rest_lengths[i][NODE_U]:.2f}) q{i}-l={q_to_l:.3f} "
+            f"(ref {rest_lengths[i][NODE_L]:.2f})"
+        )
+
+    self_index = int(msg.self_index)
+    if 0 <= self_index < NUM_UAVS:
+        self_rel = sub(uav_positions[self_index], payload_pos)
+        radial_dir = unit_xy(self_rel)
+        radial_acc = desired_acc[0] * radial_dir[0] + desired_acc[1] * radial_dir[1]
+        structure_term = tuple(-value / max(msg.mass, EPS) for value in passive_force)
+        tracking_term = tuple(value / max(msg.mass, EPS) for value in tracking_input)
+        lines.append("self command:")
+        lines.append(
+            f"  acc_xy={fmt_vec_xy(desired_acc)} |acc_xy|={norm_xy(desired_acc):.3f} "
+            f"radial_acc={radial_acc:+.3f} ({command_direction_label(radial_acc)}) "
+            f"acc_z={desired_acc[2]:+.3f}"
+        )
+        lines.append(
+            f"  structure_xy={fmt_vec_xy(structure_term)} |structure_xy|={norm_xy(structure_term):.3f} "
+            f"tracking_xy={fmt_vec_xy(tracking_term)} |tracking_xy|={norm_xy(tracking_term):.3f}"
+        )
+
+    return "\n".join(lines)
+
+
+def create_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Analyze /swarm_planner/debug messages")
+    parser.add_argument(
+        "--topic",
+        default="/swarm_planner/debug",
+        help="SwarmPlannerDebug topic (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Print one report and exit",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Minimum report interval in seconds for streaming mode",
+    )
+    parser.add_argument(
+        "--node-name",
+        default="swarm_debug_analyzer",
+        help="ROS 2 node name (default: %(default)s)",
+    )
+    return parser
+
+
+class DebugAnalyzerNode(Node):
+    def __init__(self, node_name: str, topic: str, once: bool, interval_s: float) -> None:
+        super().__init__(node_name)
+        self._once = once
+        self._interval_s = max(0.0, interval_s)
+        self._done = False
+        self._last_report_time = 0.0
+
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        self.create_subscription(SwarmPlannerDebug, topic, self._on_debug, qos)
+        self.get_logger().info(
+            f"listening on {topic} | once={self._once} interval={self._interval_s:.2f}s"
+        )
+
+    @property
+    def done(self) -> bool:
+        return self._done
+
+    def _on_debug(self, msg: SwarmPlannerDebug) -> None:
+        now = time.monotonic()
+        if not self._once and now - self._last_report_time < self._interval_s:
+            return
+
+        print(render_report(msg), flush=True)
+        print("", flush=True)
+        self._last_report_time = now
+        if self._once:
+            self._done = True
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    argv = argv if argv is not None else sys.argv
+    parser = create_arg_parser()
+    args = parser.parse_args(remove_ros_args(argv)[1:])
+
+    rclpy.init(args=remove_ros_args(argv))
+    node = DebugAnalyzerNode(args.node_name, args.topic, args.once, args.interval)
+    try:
+        while rclpy.ok() and not node.done:
+            rclpy.spin_once(node, timeout_sec=0.2)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        return 130
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
