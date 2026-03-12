@@ -25,33 +25,24 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 add_library(swarm_planner_core_lib STATIC
+  src/planner_utils.cpp
   src/swarm_planner_core.cpp
 )
 set_target_properties(swarm_planner_core_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(swarm_planner_core_lib PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-ament_target_dependencies(swarm_planner_core_lib rclcpp Eigen3)
-
-add_library(swarm_state_aggregator_lib STATIC
-  src/swarm_state_aggregator.cpp
-)
-set_target_properties(swarm_state_aggregator_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(swarm_state_aggregator_lib PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-ament_target_dependencies(swarm_state_aggregator_lib rclcpp geometry_msgs sensor_msgs px4_msgs Eigen3)
+ament_target_dependencies(swarm_planner_core_lib rclcpp geometry_msgs sensor_msgs px4_msgs Eigen3)
 
 add_executable(swarm_planner_node
-  src/param_loader.cpp
   src/swarm_planner_node.cpp
-  src/main.cpp
 )
 target_include_directories(swarm_planner_node PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(swarm_planner_node swarm_planner_core_lib swarm_state_aggregator_lib)
+target_link_libraries(swarm_planner_node swarm_planner_core_lib)
 ament_target_dependencies(swarm_planner_node rclcpp geometry_msgs sensor_msgs std_msgs px4_msgs Eigen3)
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(swarm_planner_node "${cpp_typesupport_target}")
 
 install(TARGETS
   swarm_planner_core_lib
-  swarm_state_aggregator_lib
   swarm_planner_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -73,20 +64,14 @@ if(BUILD_TESTING)
   if(TARGET test_swarm_planner_core)
     target_include_directories(test_swarm_planner_core PRIVATE include ${EIGEN3_INCLUDE_DIRS})
     target_link_libraries(test_swarm_planner_core swarm_planner_core_lib)
-    ament_target_dependencies(test_swarm_planner_core rclcpp Eigen3)
+    ament_target_dependencies(test_swarm_planner_core rclcpp geometry_msgs sensor_msgs px4_msgs Eigen3)
   endif()
 
-  ament_add_gtest(test_attitude_thrust_mapper test/test_attitude_thrust_mapper.cpp)
-  if(TARGET test_attitude_thrust_mapper)
-    target_include_directories(test_attitude_thrust_mapper PRIVATE include ${EIGEN3_INCLUDE_DIRS})
-    ament_target_dependencies(test_attitude_thrust_mapper Eigen3)
-  endif()
-
-  ament_add_gtest(test_swarm_state_aggregator test/test_swarm_state_aggregator.cpp)
-  if(TARGET test_swarm_state_aggregator)
-    target_include_directories(test_swarm_state_aggregator PRIVATE include ${EIGEN3_INCLUDE_DIRS})
-    target_link_libraries(test_swarm_state_aggregator swarm_state_aggregator_lib)
-    ament_target_dependencies(test_swarm_state_aggregator rclcpp geometry_msgs sensor_msgs px4_msgs Eigen3)
+  ament_add_gtest(test_swarm_state_actions test/test_swarm_state_actions.cpp)
+  if(TARGET test_swarm_state_actions)
+    target_include_directories(test_swarm_state_actions PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+    target_link_libraries(test_swarm_state_actions swarm_planner_core_lib)
+    ament_target_dependencies(test_swarm_state_actions rclcpp geometry_msgs sensor_msgs px4_msgs Eigen3)
   endif()
 
   find_package(ament_lint_auto REQUIRED)

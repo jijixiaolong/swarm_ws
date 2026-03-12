@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""
+Export rosbag2 experiment data to CSV and generate a few diagnostic plots.
+
+Typical usage:
+  ros2 run fsmpx4 analyze_swarm_bag ~/swarm_bags/swarm_20260312_153000
+"""
+
+import argparse
+import csv
+import math
+import os
+import re
+import sys
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import rosbag2_py
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.convert import message_to_ordereddict
+from rosidl_runtime_py.utilities import get_message
+
+
+PLANNER_DEBUG_PATTERN = re.compile(r"(^|/)(swarm_planner)/debug$")
+FSM_DEBUG_PATTERN = re.compile(r"(^|/)(fsmpx4_fsm)/debug$")
+
+
+@dataclass
+class PlannerSeries:
+    label: str
+    plot_name: str
+    self_index: int = -1
+    first_time_s: float | None = None
+    payload_x: list[float] = field(default_factory=list)
+    payload_y: list[float] = field(default_factory=list)
+    time_s: list[float] = field(default_factory=list)
+    payload_z: list[float] = field(default_factory=list)
+    target_x: list[float] = field(default_factory=list)
+    target_y: list[float] = field(default_factory=list)
+    target_z: list[float] = field(default_factory=list)
+    virtual_self_x: list[float] = field(default_factory=list)
+    virtual_self_y: list[float] = field(default_factory=list)
+    virtual_self_z: list[float] = field(default_factory=list)
+    virtual_u_x: list[float] = field(default_factory=list)
+    virtual_u_y: list[float] = field(default_factory=list)
+    virtual_u_z: list[float] = field(default_factory=list)
+    virtual_l_x: list[float] = field(default_factory=list)
+    virtual_l_y: list[float] = field(default_factory=list)
+    virtual_l_z: list[float] = field(default_factory=list)
+    payload_vz: list[float] = field(default_factory=list)
+    desired_acc_z: list[float] = field(default_factory=list)
+    mapped_acc_z: list[float] = field(default_factory=list)
+    cfo_acc_z: list[float] = field(default_factory=list)
+    error_norm: list[float] = field(default_factory=list)
+
+    def add(self, bag_time_s: float, row: Mapping[str, Any]) -> None:
+        if self.first_time_s is None:
+            self.first_time_s = bag_time_s
+        if self.self_index < 0 and "self_index" in row:
+            self.self_index = int(as_float(row["self_index"]))
+        self.time_s.append(bag_time_s - self.first_time_s)
+        self.payload_x.append(as_float(row.get("payload_position_ned.x")))
+        self.payload_y.append(as_float(row.get("payload_position_ned.y")))
+        self.payload_z.append(as_float(row.get("payload_position_ned.z")))
+        self.target_x.append(as_float(row.get("payload_target_ned.x")))
+        self.target_y.append(as_float(row.get("payload_target_ned.y")))
+        self.target_z.append(as_float(row.get("payload_target_ned.z")))
+        self.virtual_self_x.append(as_float(row.get(f"virtual_positions_ned[{self.self_index}].x")))
+        self.virtual_self_y.append(as_float(row.get(f"virtual_positions_ned[{self.self_index}].y")))
+        self.virtual_self_z.append(as_float(row.get(f"virtual_positions_ned[{self.self_index}].z")))
+        self.virtual_u_x.append(as_float(row.get("virtual_positions_ned[3].x")))
+        self.virtual_u_y.append(as_float(row.get("virtual_positions_ned[3].y")))
+        self.virtual_u_z.append(as_float(row.get("virtual_positions_ned[3].z")))
+        self.virtual_l_x.append(as_float(row.get("virtual_positions_ned[4].x")))
+        self.virtual_l_y.append(as_float(row.get("virtual_positions_ned[4].y")))
+        self.virtual_l_z.append(as_float(row.get("virtual_positions_ned[4].z")))
+        self.payload_vz.append(as_float(row.get("payload_velocity_ned.z")))
+        self.desired_acc_z.append(as_float(row.get("desired_acceleration.z")))
+        self.mapped_acc_z.append(as_float(row.get("mapped_acceleration.z")))
+        self.cfo_acc_z.append(as_float(row.get("cfo_acceleration.z")))
+        dx = as_float(row.get("payload_position_ned.x")) - as_float(row.get("payload_target_ned.x"))
+        dy = as_float(row.get("payload_position_ned.y")) - as_float(row.get("payload_target_ned.y"))
+        dz = as_float(row.get("payload_position_ned.z")) - as_float(row.get("payload_target_ned.z"))
+        self.error_norm.append(math.sqrt(dx * dx + dy * dy + dz * dz))
+
+
+@dataclass
+class FsmSeries:
+    label: str
+    first_time_s: float | None = None
+    time_s: list[float] = field(default_factory=list)
+    uav_z: list[float] = field(default_factory=list)
+    uav_vz: list[float] = field(default_factory=list)
+    cmd_acc_z: list[float] = field(default_factory=list)
+    control_thrust: list[float] = field(default_factory=list)
+
+    def add(self, bag_time_s: float, row: Mapping[str, Any]) -> None:
+        if self.first_time_s is None:
+            self.first_time_s = bag_time_s
+        self.time_s.append(bag_time_s - self.first_time_s)
+        self.uav_z.append(as_float(row.get("uav_position.z")))
+        self.uav_vz.append(as_float(row.get("uav_velocity.z")))
+        self.cmd_acc_z.append(as_float(row.get("cmd_acceleration.z")))
+        self.control_thrust.append(as_float(row.get("control_thrust")))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Export and visualize swarm rosbag data")
+    parser.add_argument("bag_path", help="Path to the rosbag2 directory")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for exported CSV and plots (default: <bag_path>/analysis)",
+    )
+    parser.add_argument(
+        "--storage-id",
+        default="sqlite3",
+        help="rosbag2 storage backend used by the bag (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--skip-plots",
+        action="store_true",
+        help="Only export CSV and summary, do not render plots",
+    )
+    parser.add_argument(
+        "--planner-self-index",
+        type=int,
+        default=None,
+        help="If set, only render planner plots for the given self_index",
+    )
+    return parser.parse_args()
+
+
+def as_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def is_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def flatten_value(value: Any, prefix: str, out: dict[str, Any]) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            next_prefix = f"{prefix}.{key}" if prefix else str(key)
+            flatten_value(item, next_prefix, out)
+        return
+    if is_sequence(value):
+        if not value:
+            out[prefix] = ""
+            return
+        for idx, item in enumerate(value):
+            next_prefix = f"{prefix}[{idx}]"
+            flatten_value(item, next_prefix, out)
+        return
+    out[prefix] = value
+
+
+def sanitize_name(name: str) -> str:
+    cleaned = name.strip().strip("/")
+    if not cleaned:
+        return "root"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", cleaned)
+
+
+def ordered_fieldnames(row: Mapping[str, Any]) -> list[str]:
+    preferred = ["_bag_time_ns", "_bag_time_s"]
+    others = sorted(key for key in row.keys() if key not in preferred)
+    return preferred + others
+
+
+def planner_series_key(topic: str, row: Mapping[str, Any]) -> str:
+    if "self_index" in row:
+        return f"{topic}__self_{int(as_float(row['self_index']))}"
+    return topic
+
+
+def planner_plot_name(label: str) -> str:
+    topic_part, _, suffix = label.rpartition("__")
+    parts = [part for part in topic_part.strip("/").split("/") if part]
+    if len(parts) >= 2:
+        topic_name = "_".join(parts[-2:])
+    elif parts:
+        topic_name = "_".join(parts)
+    else:
+        topic_name = "swarm_planner_debug"
+    return f"{topic_name}__{suffix}" if suffix else topic_name
+
+
+def clear_generated_outputs(csv_dir: Path, plot_dir: Path, summary_path: Path) -> None:
+    for pattern in ("*.csv",):
+        for path in csv_dir.glob(pattern):
+            path.unlink()
+    for pattern in ("*.png",):
+        for path in plot_dir.glob(pattern):
+            path.unlink()
+    if summary_path.exists():
+        summary_path.unlink()
+
+
+def write_summary(
+    summary_path: Path,
+    bag_path: Path,
+    topic_counts: Mapping[str, int],
+    topic_types: Mapping[str, str],
+    csv_paths: Mapping[str, Path],
+    plot_paths: Sequence[Path],
+) -> None:
+    with summary_path.open("w", encoding="utf-8") as handle:
+        handle.write(f"bag_path: {bag_path}\n")
+        handle.write("topics:\n")
+        for topic in sorted(topic_counts):
+            handle.write(
+                f"  {topic}: type={topic_types[topic]} messages={topic_counts[topic]} "
+                f"csv={csv_paths[topic]}\n"
+            )
+        if plot_paths:
+            handle.write("plots:\n")
+            for plot_path in plot_paths:
+                handle.write(f"  {plot_path}\n")
+
+
+def plot_planner_series(series_map: Mapping[str, PlannerSeries], plot_dir: Path) -> list[Path]:
+    output_paths: list[Path] = []
+    for label, series in series_map.items():
+        if not series.time_s:
+            continue
+        fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
+        fig.suptitle(f"Planner Debug: {label}")
+
+        axes[0].plot(series.time_s, series.payload_x, label="payload_x")
+        axes[0].plot(series.time_s, series.target_x, label="target_x", linestyle="--")
+        axes[0].plot(series.time_s, series.virtual_self_x, label="q_self_x")
+        axes[0].plot(series.time_s, series.virtual_u_x, label="q_u_x")
+        axes[0].plot(series.time_s, series.virtual_l_x, label="q_l_x")
+        axes[0].set_ylabel("x [m]")
+        axes[0].grid(True)
+        axes[0].legend()
+
+        axes[1].plot(series.time_s, series.payload_y, label="payload_y")
+        axes[1].plot(series.time_s, series.target_y, label="target_y", linestyle="--")
+        axes[1].plot(series.time_s, series.virtual_self_y, label="q_self_y")
+        axes[1].plot(series.time_s, series.virtual_u_y, label="q_u_y")
+        axes[1].plot(series.time_s, series.virtual_l_y, label="q_l_y")
+        axes[1].set_ylabel("y [m]")
+        axes[1].grid(True)
+        axes[1].legend()
+
+        axes[2].plot(series.time_s, series.payload_z, label="payload_z")
+        axes[2].plot(series.time_s, series.target_z, label="target_z", linestyle="--")
+        axes[2].plot(series.time_s, series.virtual_self_z, label="q_self_z")
+        axes[2].plot(series.time_s, series.virtual_u_z, label="q_u_z")
+        axes[2].plot(series.time_s, series.virtual_l_z, label="q_l_z")
+        axes[2].set_ylabel("z [m]")
+        axes[2].grid(True)
+        axes[2].legend()
+
+        axes[3].plot(series.time_s, series.payload_vz, label="payload_vz")
+        axes[3].plot(series.time_s, series.error_norm, label="payload_error_norm")
+        axes[3].plot(series.time_s, series.desired_acc_z, label="desired_acc_z")
+        axes[3].plot(series.time_s, series.mapped_acc_z, label="mapped_acc_z")
+        axes[3].plot(series.time_s, series.cfo_acc_z, label="cfo_acc_z")
+        axes[3].set_ylabel("vz / err / acc")
+        axes[3].set_xlabel("time [s]")
+        axes[3].grid(True)
+        axes[3].legend()
+
+        output_path = plot_dir / f"{sanitize_name(series.plot_name)}_planner.png"
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=160)
+        plt.close(fig)
+        output_paths.append(output_path)
+    return output_paths
+
+
+def plot_fsm_series(series_map: Mapping[str, FsmSeries], plot_dir: Path) -> list[Path]:
+    output_paths: list[Path] = []
+    for label, series in series_map.items():
+        if not series.time_s:
+            continue
+        fig, axes = plt.subplots(4, 1, figsize=(11, 10), sharex=True)
+        fig.suptitle(f"FSM Debug: {label}")
+
+        axes[0].plot(series.time_s, series.uav_z, label="uav_z")
+        axes[0].set_ylabel("z [m]")
+        axes[0].grid(True)
+        axes[0].legend()
+
+        axes[1].plot(series.time_s, series.uav_vz, label="uav_vz")
+        axes[1].set_ylabel("vz [m/s]")
+        axes[1].grid(True)
+        axes[1].legend()
+
+        axes[2].plot(series.time_s, series.cmd_acc_z, label="cmd_acc_z")
+        axes[2].set_ylabel("acc [m/s^2]")
+        axes[2].grid(True)
+        axes[2].legend()
+
+        axes[3].plot(series.time_s, series.control_thrust, label="control_thrust")
+        axes[3].set_ylabel("thrust")
+        axes[3].set_xlabel("time [s]")
+        axes[3].grid(True)
+        axes[3].legend()
+
+        output_path = plot_dir / f"{sanitize_name(label)}_fsm.png"
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=160)
+        plt.close(fig)
+        output_paths.append(output_path)
+    return output_paths
+
+
+def main() -> int:
+    args = parse_args()
+    bag_path = Path(args.bag_path).expanduser().resolve()
+    if not bag_path.exists():
+        print(f"Bag path does not exist: {bag_path}", file=sys.stderr)
+        return 2
+
+    output_dir = (
+        Path(args.output_dir).expanduser().resolve()
+        if args.output_dir
+        else bag_path / "analysis"
+    )
+    csv_dir = output_dir / "csv"
+    plot_dir = output_dir / "plots"
+    summary_path = output_dir / "summary.txt"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    clear_generated_outputs(csv_dir, plot_dir, summary_path)
+
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=str(bag_path), storage_id=args.storage_id),
+        rosbag2_py.ConverterOptions(
+            input_serialization_format="cdr",
+            output_serialization_format="cdr",
+        ),
+    )
+
+    topic_info = reader.get_all_topics_and_types()
+    topic_types = {topic.name: topic.type for topic in topic_info}
+    topic_classes = {name: get_message(topic_type) for name, topic_type in topic_types.items()}
+    topic_counts: dict[str, int] = defaultdict(int)
+    csv_paths: dict[str, Path] = {}
+    csv_files: dict[str, Any] = {}
+    csv_writers: dict[str, csv.DictWriter] = {}
+    planner_series_map: dict[str, PlannerSeries] = {}
+    fsm_series_map: dict[str, FsmSeries] = {}
+
+    try:
+        while reader.has_next():
+            topic, serialized, bag_time_ns = reader.read_next()
+            msg = deserialize_message(serialized, topic_classes[topic])
+            row = {}
+            flatten_value(message_to_ordereddict(msg), "", row)
+            row["_bag_time_ns"] = int(bag_time_ns)
+            row["_bag_time_s"] = float(bag_time_ns) * 1e-9
+
+            if topic not in csv_writers:
+                csv_path = csv_dir / f"{sanitize_name(topic)}.csv"
+                csv_paths[topic] = csv_path
+                csv_file = csv_path.open("w", newline="", encoding="utf-8")
+                writer = csv.DictWriter(csv_file, fieldnames=ordered_fieldnames(row))
+                writer.writeheader()
+                csv_files[topic] = csv_file
+                csv_writers[topic] = writer
+            csv_writers[topic].writerow(row)
+            topic_counts[topic] += 1
+
+            if PLANNER_DEBUG_PATTERN.search(topic):
+                key = planner_series_key(topic, row)
+                series = planner_series_map.setdefault(
+                    key,
+                    PlannerSeries(label=key, plot_name=planner_plot_name(key)),
+                )
+                series.add(row["_bag_time_s"], row)
+            elif FSM_DEBUG_PATTERN.search(topic):
+                series = fsm_series_map.setdefault(topic, FsmSeries(label=topic))
+                series.add(row["_bag_time_s"], row)
+    finally:
+        for csv_file in csv_files.values():
+            csv_file.close()
+
+    if args.planner_self_index is not None:
+        planner_series_map = {
+            label: series
+            for label, series in planner_series_map.items()
+            if series.self_index == args.planner_self_index
+        }
+
+    plot_paths: list[Path] = []
+    if not args.skip_plots:
+        plot_paths.extend(plot_planner_series(planner_series_map, plot_dir))
+        plot_paths.extend(plot_fsm_series(fsm_series_map, plot_dir))
+
+    write_summary(summary_path, bag_path, topic_counts, topic_types, csv_paths, plot_paths)
+
+    print(f"Bag analysis written to: {output_dir}")
+    print(f"Summary: {summary_path}")
+    print(f"CSV files: {csv_dir}")
+    if not args.skip_plots:
+        print(f"Plots: {plot_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

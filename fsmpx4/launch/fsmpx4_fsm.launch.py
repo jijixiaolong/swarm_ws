@@ -15,16 +15,23 @@ def generate_launch_description():
 
     px4_ns = LaunchConfiguration('px4_ns')
     target_system_id = LaunchConfiguration('target_system_id')
+    node_namespace = LaunchConfiguration('node_namespace')
 
     return LaunchDescription([
         DeclareLaunchArgument('px4_ns', default_value='',
                               description='PX4 namespace, e.g. /px4_1'),
         DeclareLaunchArgument('target_system_id', default_value='1',
                               description='MAVLink target system ID'),
+        DeclareLaunchArgument(
+            'node_namespace',
+            default_value='',
+            description='ROS namespace for fsmpx4_fsm and its private topics, e.g. px4_1',
+        ),
         Node(
             package='fsmpx4',
             executable='fsm_node',
             name='fsmpx4_fsm',
+            namespace=node_namespace,
             output='screen',
             parameters=[config_file, {
                 'px4_ns': px4_ns,

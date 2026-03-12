@@ -105,13 +105,21 @@ $$
 - $k_{ij}>0$ 为虚拟弹簧刚度；$c_1>0,c_2>0$ 分别为阻尼系数和摩擦系数。
 - $\bar l_{ij0}$ 为期望节点间距。
 
-## 3. 速度跟踪控制律
+## 3. 位置外环与速度跟踪控制律
+$$
+e_p=p_l-p_l^d
+$$
+
+$$
+v_d=-K_p^p e_p
+$$
+
 $$
 e_i=\dot q_i-v_d
 $$
 
 $$
-u_i=m_i\dot v_d-\left(K_p e_i+K_I\int e_i\,dt+K_d\frac{d e_i}{dt}\right)
+u_i=-\left(K_p e_i+K_I\int e_i\,dt+K_d\frac{d e_i}{dt}\right)
 $$
 
 $$
@@ -119,7 +127,7 @@ $$
 $$
 
 $$
-\ddot q_{iu}=\frac{u_i}{m_i}=\dot v_d-\frac{1}{m_i}\left(K_p e_i+K_I\int e_i\,dt+K_d\frac{d e_i}{dt}\right)
+\ddot q_{iu}=\frac{u_i}{m_i}
 $$
 
 $$
@@ -127,16 +135,25 @@ $$
 $$
 
 其中：
-- $v_d,\dot v_d$ 为期望速度及其导数。
-- $K_p,K_I,K_d$ 为外环增益（可取标量或对角矩阵）。
+- $p_l^d$ 为载荷目标位置，$e_p$ 为载荷位置误差。
+- $K_p^p$ 为位置外环比例增益，用于将位置误差直接映射成期望速度 $v_d$。
+- $e_i$ 为第 $i$ 个虚拟节点的速度跟踪误差。
+- $K_p,K_I,K_d$ 为虚拟节点速度 PID 内环增益（可取标量或对角矩阵）。
 - $u_i$ 为虚拟节点输入，$m_i$ 为第 $i$ 架 UAV 质量。
 
 ## 4. 虚拟加速度映射到真实 UAV
 $$
-a_{id,i}=\ddot q_l+\frac{|z_l-z_i|}{|z_u-z_l|}\left(\ddot q_i-\ddot q_l\right)
+\beta_i=\frac{|z_l-z_i|}{|z_u-z_l|}=\frac{|z_l-z_i|}{h_u}
 $$
 
-其中：$a_{id,i}$ 为真实系统中第 $i$ 架 UAV 的期望加速度。
+$$
+a_{id,i}=\beta_i\,\ddot q_i
+$$
+
+其中：
+- $\beta_i$ 为第 $i$ 架 UAV 的虚实映射系数，对应实现中的 `state.beta[i]`。
+- $a_{id,i}$ 为真实系统中第 $i$ 架 UAV 的期望加速度，对应实现中的 `mapped_acceleration`。
+- 由于实现中使用竖直距离绝对值，映射比例只与高度差大小有关。
 
 ## 5. CFO 轴向扰动观测器
 $$

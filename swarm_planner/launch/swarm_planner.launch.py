@@ -14,16 +14,23 @@ def generate_launch_description():
 
     px4_ns = LaunchConfiguration('px4_ns')
     self_index = LaunchConfiguration('self_index')
+    node_namespace = LaunchConfiguration('node_namespace')
 
     return LaunchDescription([
         DeclareLaunchArgument('px4_ns', default_value='',
                               description='PX4 namespace, e.g. /px4_1'),
         DeclareLaunchArgument('self_index', default_value='-1',
                               description='Planner self index in swarm [0, 1, 2]'),
+        DeclareLaunchArgument(
+            'node_namespace',
+            default_value='',
+            description='ROS namespace for swarm_planner and its private topics, e.g. px4_1',
+        ),
         Node(
             package='swarm_planner',
             executable='swarm_planner_node',
             name='swarm_planner',
+            namespace=node_namespace,
             output='screen',
             parameters=[config_file, {
                 'px4_ns': px4_ns,

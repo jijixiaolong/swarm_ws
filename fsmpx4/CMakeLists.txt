@@ -75,6 +75,12 @@ install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
 install(DIRECTORY script/ DESTINATION share/${PROJECT_NAME}/script
   PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
+install(PROGRAMS
+  script/auto_arm.py
+  script/rc.py
+  script/analyze_swarm_bag
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 # ── Testing ──
 

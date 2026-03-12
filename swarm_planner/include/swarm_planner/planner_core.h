@@ -1,29 +1,21 @@
-#ifndef SWARM_PLANNER_CORE_H_
-#define SWARM_PLANNER_CORE_H_
+#ifndef SWARM_PLANNER_PLANNER_CORE_H_
+#define SWARM_PLANNER_PLANNER_CORE_H_
 
 #include <array>
 #include <vector>
 
 #include <Eigen/Dense>
 
-#include "types.h"
+#include "planner_types.h"
 
 namespace swarm_planner {
 namespace control {
 
-// Simplified fixed-point controller derived from the virtual-passivity
-// framework in "Distributed Network Control of Multi-UAV Systems for
-// Cooperative Heavy-Load Transport Using a Virtual-Passivity Framework".
-//
-// The paper tracks a desired load velocity. For the point-hold use case in
-// this repository, that desired velocity is generated from payload position
-// error, while the virtual spring-damper network and optional cable-force
-// observer keep the decentralized structure of the original method.
 class SwarmPlannerCore
 {
 public:
     static constexpr int kNumUavs = 3;
-    static constexpr int kNumNodes = kNumUavs + 2;  // [1,2,3,u,l]
+    static constexpr int kNumNodes = kNumUavs + 2;
 
     struct CFOConfig
     {
@@ -45,14 +37,11 @@ public:
         double vel_pid_kp{1.0};
         double vel_pid_ki{0.0};
         double vel_pid_kd{0.2};
-        // Point-hold outer-loop gain used to generate
-        // v_d = -payload_kp * (p_l - p_l_star).
         double payload_kp{1.2};
         double acc_norm_limit_m_s2{6.0};
         double dt_min_s{0.001};
         double dt_max_s{0.2};
         double integral_limit{2.0};
-        double epsilon{1e-4};
         std::vector<double> rest_lengths_override{};
         CFOConfig cfo{};
     };
@@ -63,9 +52,7 @@ public:
         std::array<Vector3, kNumUavs> uav_velocities_ned{};
         Vector3 payload_position_ned{Vector3::Zero()};
         Vector3 payload_velocity_ned{Vector3::Zero()};
-        // Fixed payload position target for the point-hold controller.
         Vector3 payload_target_ned{Vector3::Zero()};
-        // Previous thrust is only used by the optional CFO disturbance estimate.
         Vector3 previous_thrust_vector{Vector3::Zero()};
         int self_index{-1};
         double mass{1.0};
@@ -119,49 +106,45 @@ public:
 
 private:
     using NodeVector = std::array<Vector3, kNumNodes>;
+
     struct VirtualState
     {
         NodeVector q{};
         NodeVector qdot{};
         std::array<double, kNumUavs> beta{};
     };
+
     struct CfoResult
     {
         Vector3 acceleration{Vector3::Zero()};
         bool used{false};
     };
 
-    static bool validateConfig(const Config& cfg);
     static bool finiteVector(const Vector3& v);
     static double sat(double x);
     static Vector3 clipNorm(const Vector3& v, double max_norm);
     void clearRuntimeState();
     bool applyConfiguredRestLengths();
     bool validateInput(const Input& input) const;
-    VirtualState buildVirtualState(const Input& input, double eps, double h_u) const;
-    Vector3 computePassiveNetworkForce(int self_index, const VirtualState& state, double eps) const;
+    VirtualState buildVirtualState(const Input& input, double h_u) const;
+    Vector3 computePassiveNetworkForce(int self_index, const VirtualState& state) const;
     Vector3 computeTrackingInput(
         const Vector3& qdot_i,
-        double mass,
         double dt,
-        const Vector3& desired_payload_velocity,
-        const Vector3& desired_payload_acceleration);
+        const Vector3& desired_payload_velocity);
     CfoResult computeCfoAcceleration(
         const Input& input,
-        double eps,
         double mass,
-        bool dt_valid_for_update);
+        double dt);
 
     Config cfg_{};
     bool initialized_{false};
     bool structure_locked_{false};
     Eigen::Matrix<double, kNumNodes, kNumNodes> rest_lengths_{
         Eigen::Matrix<double, kNumNodes, kNumNodes>::Zero()};
-
     Vector3 velocity_integral_{Vector3::Zero()};
     Vector3 prev_velocity_error_{Vector3::Zero()};
     bool prev_velocity_error_valid_{false};
-
     double cfo_hat_v_parallel_{0.0};
     double cfo_hat_d_parallel_{0.0};
 };
@@ -169,4 +152,4 @@ private:
 }  // namespace control
 }  // namespace swarm_planner
 
-#endif  // SWARM_PLANNER_CORE_H_
+#endif  // SWARM_PLANNER_PLANNER_CORE_H_

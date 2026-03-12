@@ -1,4 +1,5 @@
-#include "swarm_planner/swarm_planner_core.h"
+#include "swarm_planner/planner_core.h"
+#include "swarm_planner/planner_utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,42 +7,23 @@
 namespace swarm_planner {
 namespace control {
 
-bool SwarmPlannerCore::validateConfig(const Config& cfg)
-{
-    if (!std::isfinite(cfg.gravity) || cfg.gravity <= 0.0) return false;
-    if (!std::isfinite(cfg.h_u_m) || cfg.h_u_m <= 0.0) return false;
-    if (!std::isfinite(cfg.spring_k) || cfg.spring_k < 0.0) return false;
-    if (!std::isfinite(cfg.damping_c1) || cfg.damping_c1 < 0.0) return false;
-    if (!std::isfinite(cfg.friction_c2) || cfg.friction_c2 < 0.0) return false;
-    if (!std::isfinite(cfg.vel_pid_kp) || cfg.vel_pid_kp < 0.0) return false;
-    if (!std::isfinite(cfg.vel_pid_ki) || cfg.vel_pid_ki < 0.0) return false;
-    if (!std::isfinite(cfg.vel_pid_kd) || cfg.vel_pid_kd < 0.0) return false;
-    if (!std::isfinite(cfg.payload_kp) || cfg.payload_kp < 0.0) return false;
-    if (!std::isfinite(cfg.acc_norm_limit_m_s2) || cfg.acc_norm_limit_m_s2 <= 0.0) return false;
-    if (!std::isfinite(cfg.dt_min_s) || cfg.dt_min_s <= 0.0) return false;
-    if (!std::isfinite(cfg.dt_max_s) || cfg.dt_max_s < cfg.dt_min_s) return false;
-    if (!std::isfinite(cfg.epsilon) || cfg.epsilon <= 0.0) return false;
-    if (!std::isfinite(cfg.cfo.l1) || cfg.cfo.l1 < 0.0) return false;
-    if (!std::isfinite(cfg.cfo.l2) || cfg.cfo.l2 < 0.0) return false;
-    if (!std::isfinite(cfg.cfo.phi) || cfg.cfo.phi <= 0.0) return false;
-    if (!std::isfinite(cfg.cfo.fmax_n) || cfg.cfo.fmax_n < 0.0) return false;
-    if (!std::isfinite(cfg.cfo.l_min_m) || cfg.cfo.l_min_m < 0.0) return false;
-
-    return true;
-}
-
 bool SwarmPlannerCore::initialize(const Config& cfg)
 {
-    if (!validateConfig(cfg))
-    {
-        return false;
-    }
-
     cfg_ = cfg;
     initialized_ = false;
     clearRuntimeState();
     structure_locked_ = false;
     rest_lengths_.setZero();
+
+    if (!std::isfinite(cfg_.h_u_m) || cfg_.h_u_m <= 0.0)
+    {
+        return false;
+    }
+
+    if (cfg_.cfo.enable && (!std::isfinite(cfg_.cfo.phi) || cfg_.cfo.phi <= 0.0))
+    {
+        return false;
+    }
 
     if (!applyConfiguredRestLengths())
     {
@@ -83,7 +65,7 @@ bool SwarmPlannerCore::finiteVector(const Vector3& v)
     return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
 }
 
-double SwarmPlannerCore::sat(double x)
+double SwarmPlannerCore::sat(const double x)
 {
     return std::clamp(x, -1.0, 1.0);
 }
@@ -95,18 +77,13 @@ Vector3 SwarmPlannerCore::clipNorm(const Vector3& v, const double max_norm)
         return Vector3::Zero();
     }
 
-    const double n = v.norm();
-    if (!std::isfinite(n) || n <= max_norm)
+    const double norm = v.norm();
+    if (!std::isfinite(norm) || norm <= max_norm)
     {
         return v;
     }
 
-    if (n < 1e-9)
-    {
-        return Vector3::Zero();
-    }
-
-    return v * (max_norm / n);
+    return v * (max_norm / norm);
 }
 
 bool SwarmPlannerCore::applyConfiguredRestLengths()
@@ -124,40 +101,19 @@ bool SwarmPlannerCore::applyConfiguredRestLengths()
         return false;
     }
 
-    const double tol = std::max(cfg_.epsilon, 1e-6);
-    for (int row = 0; row < kNumNodes; ++row)
+    if (!planner_utils::loadRestLengthMatrix(cfg_.rest_lengths_override, rest_lengths_))
     {
-        for (int col = 0; col < kNumNodes; ++col)
-        {
-            const double len = cfg_.rest_lengths_override[row * kNumNodes + col];
-            if (!std::isfinite(len) || len < 0.0)
-            {
-                return false;
-            }
-
-            if (row == col)
-            {
-                if (std::abs(len) > tol)
-                {
-                    return false;
-                }
-                rest_lengths_(row, col) = 0.0;
-                continue;
-            }
-
-            rest_lengths_(row, col) = len;
-        }
+        return false;
     }
 
-    for (int row = 0; row < kNumNodes; ++row)
+    if (!planner_utils::validateRestLengthDiagonal(rest_lengths_))
     {
-        for (int col = row + 1; col < kNumNodes; ++col)
-        {
-            if (std::abs(rest_lengths_(row, col) - rest_lengths_(col, row)) > tol)
-            {
-                return false;
-            }
-        }
+        return false;
+    }
+
+    if (!planner_utils::validateRestLengthSymmetry(rest_lengths_))
+    {
+        return false;
     }
 
     structure_locked_ = true;
@@ -166,49 +122,15 @@ bool SwarmPlannerCore::applyConfiguredRestLengths()
 
 bool SwarmPlannerCore::validateInput(const Input& input) const
 {
-    if (!initialized_)
-    {
-        return false;
-    }
-
-    if (input.self_index < 0 || input.self_index >= kNumUavs)
-    {
-        return false;
-    }
-
-    if (!std::isfinite(input.mass) || input.mass <= 0.0)
-    {
-        return false;
-    }
-
-    if (!std::isfinite(input.dt) || input.dt < 0.0)
-    {
-        return false;
-    }
-
-    for (int i = 0; i < kNumUavs; ++i)
-    {
-        if (!finiteVector(input.uav_positions_ned[i]) || !finiteVector(input.uav_velocities_ned[i]))
-        {
-            return false;
-        }
-    }
-
-    return finiteVector(input.payload_position_ned) &&
-           finiteVector(input.payload_velocity_ned) &&
-           finiteVector(input.payload_target_ned) &&
-           finiteVector(input.previous_thrust_vector);
+    return initialized_ && input.self_index >= 0 && input.self_index < kNumUavs;
 }
+
 SwarmPlannerCore::VirtualState SwarmPlannerCore::buildVirtualState(
     const Input& input,
-    const double eps,
     const double h_u) const
 {
     VirtualState state;
 
-    // The paper defines q_l as the load node and q_u as the center of a
-    // virtual tray located h_u above the load. In NED, "above" means a
-    // smaller z value, so the tray center subtracts the down-axis offset.
     state.q[kNumUavs + 1] = input.payload_position_ned;
     state.qdot[kNumUavs + 1] = input.payload_velocity_ned;
     state.q[kNumUavs] = input.payload_position_ned - Vector3(0.0, 0.0, h_u);
@@ -216,11 +138,10 @@ SwarmPlannerCore::VirtualState SwarmPlannerCore::buildVirtualState(
 
     for (int i = 0; i < kNumUavs; ++i)
     {
-        const double dz = std::abs(input.payload_position_ned.z() - input.uav_positions_ned[i].z());
-        const double alpha = h_u / std::max(dz, eps);
-        // beta = |z_l - z_i| / |z_u - z_l| appears in the paper's mapping from
-        // virtual-node acceleration back to the real UAV acceleration.
-        state.beta[i] = dz / std::max(h_u, eps);
+        const double dz =
+            std::abs(input.payload_position_ned.z() - input.uav_positions_ned[i].z());
+        const double alpha = h_u / dz;
+        state.beta[i] = dz / h_u;
         state.q[i] = input.payload_position_ned +
                      alpha * (input.uav_positions_ned[i] - input.payload_position_ned);
         state.qdot[i] = input.payload_velocity_ned +
@@ -232,11 +153,10 @@ SwarmPlannerCore::VirtualState SwarmPlannerCore::buildVirtualState(
 
 Vector3 SwarmPlannerCore::computePassiveNetworkForce(
     const int self_index,
-    const VirtualState& state,
-    const double eps) const
+    const VirtualState& state) const
 {
-    const Vector3 q_i = state.q[self_index];
-    const Vector3 qdot_i = state.qdot[self_index];
+    const Vector3& q_i = state.q[self_index];
+    const Vector3& qdot_i = state.qdot[self_index];
 
     Vector3 spring_force = Vector3::Zero();
     Vector3 damping_force = Vector3::Zero();
@@ -248,194 +168,148 @@ Vector3 SwarmPlannerCore::computePassiveNetworkForce(
         }
 
         const Vector3 diff = q_i - state.q[j];
-        const double l_ij = diff.norm();
-        if (l_ij > eps)
-        {
-            const double l0 = rest_lengths_(self_index, j);
-            spring_force += cfg_.spring_k * (1.0 - l0 / l_ij) * diff;
-        }
+        const double length = diff.norm();
+        spring_force += cfg_.spring_k *
+                        (1.0 - rest_lengths_(self_index, j) / length) * diff;
 
         damping_force += cfg_.damping_c1 * (qdot_i - state.qdot[j]);
     }
 
-    const Vector3 friction_force = cfg_.friction_c2 * qdot_i;
-    return spring_force + damping_force + friction_force;
+    return spring_force + damping_force + cfg_.friction_c2 * qdot_i;
 }
 
 Vector3 SwarmPlannerCore::computeTrackingInput(
     const Vector3& qdot_i,
-    const double mass,
     const double dt,
-    const Vector3& desired_payload_velocity,
-    const Vector3& desired_payload_acceleration)
+    const Vector3& desired_payload_velocity)
 {
     const Vector3 velocity_error = qdot_i - desired_payload_velocity;
-
-    Vector3 velocity_error_derivative = Vector3::Zero();
-    if (dt > 0.0 && prev_velocity_error_valid_)
-    {
-        velocity_error_derivative = (velocity_error - prev_velocity_error_) / dt;
-    }
+    const Vector3 velocity_error_derivative =
+        planner_utils::computeVelocityErrorDerivative(
+            velocity_error, prev_velocity_error_, dt, prev_velocity_error_valid_);
 
     if (dt > 0.0)
     {
         velocity_integral_ += velocity_error * dt;
-        const double integral_limit = std::abs(cfg_.integral_limit);
-        if (integral_limit > 0.0)
-        {
-            for (int k = 0; k < 3; ++k)
-            {
-                velocity_integral_(k) =
-                    std::clamp(velocity_integral_(k), -integral_limit, integral_limit);
-            }
-        }
+        planner_utils::clampIntegral(velocity_integral_, std::abs(cfg_.integral_limit));
         prev_velocity_error_ = velocity_error;
         prev_velocity_error_valid_ = true;
     }
 
-    // u_i follows the paper's feed-forward plus PID feedback structure. In the
-    // fixed-point case, v_d_dot comes from the payload position servo above.
-    return mass * desired_payload_acceleration
-           - cfg_.vel_pid_kp * velocity_error
+    return -cfg_.vel_pid_kp * velocity_error
            - cfg_.vel_pid_ki * velocity_integral_
            - cfg_.vel_pid_kd * velocity_error_derivative;
 }
 
 SwarmPlannerCore::CfoResult SwarmPlannerCore::computeCfoAcceleration(
     const Input& input,
-    const double eps,
     const double mass,
-    const bool dt_valid_for_update)
+    const double dt)
 {
     CfoResult result;
-    if (!cfg_.cfo.enable)
-    {
-        return result;
-    }
-
     const int i = input.self_index;
-    const Vector3 t_i = input.payload_position_ned - input.uav_positions_ned[i];
-    const double t_norm = t_i.norm();
-    // CFO estimates the cable-direction disturbance and only injects
-    // tensile compensation, never compression.
-    const bool cfo_ok = dt_valid_for_update && input.dt > 0.0 &&
-                        t_norm >= std::max(cfg_.cfo.l_min_m, 0.0);
-    if (!cfo_ok)
+    const Vector3 cable_vector = input.payload_position_ned - input.uav_positions_ned[i];
+    const double cable_length = cable_vector.norm();
+    if (!planner_utils::cfoReadyForUpdate(cfg_, cable_length, dt))
     {
         return result;
     }
 
-    const Vector3 t0 = t_i / t_norm;
-    const double v_parallel = input.uav_velocities_ned[i].dot(t0);
-    const Vector3 G(0.0, 0.0, -mass * cfg_.gravity);
-    const double u_parallel = (input.previous_thrust_vector + G).dot(t0) / mass;
-    const double e = v_parallel - cfo_hat_v_parallel_;
-    cfo_hat_v_parallel_ += input.dt * (u_parallel + cfo_hat_d_parallel_ + cfg_.cfo.l1 * e);
-    const double phi = std::max(cfg_.cfo.phi, eps);
-    cfo_hat_d_parallel_ += input.dt * (cfg_.cfo.l2 * sat(e / phi));
-    const double tau = std::clamp(-mass * cfo_hat_d_parallel_, 0.0, cfg_.cfo.fmax_n);
-    const Vector3 f_hat = tau * (-t0);
-    result.acceleration = f_hat / mass;
+    const Vector3 cable_direction = cable_vector / cable_length;
+    const double v_parallel = input.uav_velocities_ned[i].dot(cable_direction);
+    const Vector3 gravity_force(0.0, 0.0, -mass * cfg_.gravity);
+    const double u_parallel =
+        (input.previous_thrust_vector + gravity_force).dot(cable_direction) / mass;
+    const double error = v_parallel - cfo_hat_v_parallel_;
+
+    cfo_hat_v_parallel_ +=
+        dt * (u_parallel + cfo_hat_d_parallel_ + cfg_.cfo.l1 * error);
+    cfo_hat_d_parallel_ +=
+        dt * (cfg_.cfo.l2 * sat(error / cfg_.cfo.phi));
+
+    const double tau =
+        std::clamp(-mass * cfo_hat_d_parallel_, 0.0, cfg_.cfo.fmax_n);
+    result.acceleration = tau * (-cable_direction) / mass;
     result.used = true;
     return result;
 }
 
 bool SwarmPlannerCore::compute(const Input& input, Output& output)
 {
-    // 先清空输出，避免输入校验失败或中间数值异常时，调用方误用上一次的控制结果。
     output = Output{};
-
-    // 在更新积分器、结构参考等控制器内部状态之前，先拦截未初始化或非有限输入。
+    // 输入不完整或 self_index 非法时，直接拒绝本次计算。
     if (!validateInput(input))
     {
         return false;
     }
 
-    // 用下界保护几何量中的除法，同时只有当采样周期落在配置范围内时才允许时序状态更新。
-    const double eps = std::max(cfg_.epsilon, 1e-6);
-    const double h_u = std::max(cfg_.h_u_m, eps);
-    const double mass = std::max(input.mass, eps);
+    // 当前实现固定按 200 Hz 控制周期离散化，避免运行时 dt 抖动影响积分/微分项。
+    constexpr double dt_used = planner_utils::kFixedComputeDtS;
 
-    double dt = input.dt;
-    const bool dt_valid_for_update = dt >= cfg_.dt_min_s && dt <= cfg_.dt_max_s;
-    if (!dt_valid_for_update)
-    {
-        dt = 0.0;
-    }
+    // 将真实 UAV/payload 状态映射到内部虚拟节点网络。
+    const VirtualState state =
+        buildVirtualState(input, cfg_.h_u_m);
 
-    // 根据当前载荷和无人机状态重建论文中的虚拟节点网络，先在虚拟域内完成控制计算。
-    const VirtualState state = buildVirtualState(input, eps, h_u);
-
+    // 结构参考长度必须先成功加载，否则弹簧网络没有目标形状可跟踪。
     if (!structure_locked_)
     {
         return false;
     }
 
-    // 组合当前无人机的局部控制律：虚拟弹簧阻尼网络的被动耦合项，加上载荷定点跟踪项。
-    const int i = input.self_index;
-    const Vector3 passive_force = computePassiveNetworkForce(i, state, eps);
-    const Vector3 desired_payload_velocity =
-        -cfg_.payload_kp * (input.payload_position_ned - input.payload_target_ned);
-    const Vector3 desired_payload_acceleration =
-        -cfg_.payload_kp * input.payload_velocity_ned;
-    const Vector3 u_i = computeTrackingInput(
-        state.qdot[i],
-        mass,
-        dt,
-        desired_payload_velocity,
-        desired_payload_acceleration);
+    const int self_index = input.self_index;
+    const double mass = input.mass;
+    // 结构项负责维持虚拟编队几何关系。
+    const Vector3 passive_force = computePassiveNetworkForce(self_index, state);
+    
+    // 任务项先由 payload 位置误差生成期望速度，再由速度 PID 形成控制输入。
+    const Vector3 desired_payload_velocity =planner_utils::computeDesiredPayloadVelocity(input, cfg_);
 
-    // qdd_i 表示第 i 个虚拟节点的期望加速度，由被动网络稳定项和定点跟踪输入共同组成。
-    const Vector3 qdd_i = -passive_force / mass + u_i / mass;
+    const Vector3 tracking_input = computeTrackingInput( state.qdot[self_index], dt_used,desired_payload_velocity);
+    // 虚拟加速度 = 结构约束项 + 任务跟踪项，再按 beta 映射回当前真实 UAV。
+    const Vector3 virtual_acceleration = -passive_force / mass + tracking_input / mass;
+    
+    const Vector3 mapped_acceleration = state.beta[self_index] * virtual_acceleration;
+    // CFO 是沿缆绳方向的附加补偿项，可选开启。
+    const CfoResult cfo = computeCfoAcceleration(input, mass, dt_used);
 
-    // 文档中的映射是 a_i = qdd_l + beta * (qdd_i - qdd_l)。
-    // 点保持场景下，qdd_l 由外环位置伺服生成的 payload 期望加速度给出；
-    // 这样不会把所有无人机共享的载荷平移加速度错误放大为 beta 倍。
-    const Vector3 qdd_l = desired_payload_acceleration;
-    const Vector3 a_id = qdd_l + state.beta[i] * (qdd_i - qdd_l);
-    const CfoResult cfo = computeCfoAcceleration(input, eps, mass, dt_valid_for_update);
-
-    // 输出前先做限幅，并拒绝任何非有限结果，确保下游只接收到安全的加速度指令。
-    Vector3 a_des = a_id + cfo.acceleration;
-    a_des = clipNorm(a_des, cfg_.acc_norm_limit_m_s2);
-    if (!finiteVector(a_des))
+    Vector3 desired_acceleration = mapped_acceleration + cfo.acceleration;
+    desired_acceleration = clipNorm(desired_acceleration, cfg_.acc_norm_limit_m_s2);
+    // 输出前再做一次数值健壮性检查，避免 NaN/Inf 进入下游控制器。
+    if (!finiteVector(desired_acceleration))
     {
         return false;
     }
 
-    output.desired_acceleration = a_des;
+    output.desired_acceleration = desired_acceleration;
     output.valid = true;
     output.used_cfo = cfo.used;
-    output.debug.uav_positions_ned = input.uav_positions_ned;
-    output.debug.uav_velocities_ned = input.uav_velocities_ned;
-    output.debug.payload_position_ned = input.payload_position_ned;
-    output.debug.payload_velocity_ned = input.payload_velocity_ned;
-    output.debug.payload_target_ned = input.payload_target_ned;
-    output.debug.previous_thrust_vector = input.previous_thrust_vector;
-    output.debug.virtual_positions_ned = state.q;
-    output.debug.virtual_velocities_ned = state.qdot;
-    output.debug.beta = state.beta;
-    for (int row = 0; row < kNumNodes; ++row)
-    {
-        for (int col = 0; col < kNumNodes; ++col)
-        {
-            output.debug.rest_lengths[row * kNumNodes + col] = rest_lengths_(row, col);
-        }
-    }
-    output.debug.passive_force = passive_force;
-    output.debug.tracking_input = u_i;
-    output.debug.virtual_acceleration = qdd_i;
-    output.debug.mapped_acceleration = a_id;
-    output.debug.cfo_acceleration = cfo.acceleration;
-    output.debug.desired_acceleration = a_des;
-    output.debug.self_index = input.self_index;
-    output.debug.mass = input.mass;
-    output.debug.dt_input = input.dt;
-    output.debug.dt_used = dt;
-    output.debug.dt_valid_for_update = dt_valid_for_update;
-    output.debug.structure_locked = structure_locked_;
-    output.debug.used_cfo = cfo.used;
-    output.debug.valid = true;
+
+    // debug 字段完整保留中间量，便于在线分析每一步控制量来源。
+    auto& debug = output.debug;
+    debug.uav_positions_ned = input.uav_positions_ned;
+    debug.uav_velocities_ned = input.uav_velocities_ned;
+    debug.payload_position_ned = input.payload_position_ned;
+    debug.payload_velocity_ned = input.payload_velocity_ned;
+    debug.payload_target_ned = input.payload_target_ned;
+    debug.previous_thrust_vector = input.previous_thrust_vector;
+    debug.virtual_positions_ned = state.q;
+    debug.virtual_velocities_ned = state.qdot;
+    debug.beta = state.beta;
+    planner_utils::flattenRestLengths(rest_lengths_, debug.rest_lengths);
+    debug.passive_force = passive_force;
+    debug.tracking_input = tracking_input;
+    debug.virtual_acceleration = virtual_acceleration;
+    debug.mapped_acceleration = mapped_acceleration;
+    debug.cfo_acceleration = cfo.acceleration;
+    debug.desired_acceleration = desired_acceleration;
+    debug.self_index = input.self_index;
+    debug.mass = input.mass;
+    debug.dt_input = input.dt;
+    debug.dt_used = dt_used;
+    debug.dt_valid_for_update = true;
+    debug.structure_locked = structure_locked_;
+    debug.used_cfo = cfo.used;
+    debug.valid = true;
     return true;
 }
 
