@@ -5,7 +5,6 @@
 #include <memory>
 #include <string>
 
-#include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <px4_msgs/msg/vehicle_global_position.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -15,45 +14,22 @@
 #include "swarm_planner/planner_core.h"
 #include "swarm_planner/planner_types.h"
 #include "swarm_planner/planner_utils.h"
+#include "swarm_planner/swarm_planner_node.h"
 
 namespace swarm_planner {
-namespace {
 
-constexpr std::array<const char*, kNumUavs> kPeerNamespaces{"/px4_1", "/px4_2", "/px4_3"};
-
-rclcpp::QoS makePx4Qos()
-{
-    return rclcpp::QoS(rclcpp::KeepLast(10))
-        .reliability(rclcpp::ReliabilityPolicy::BestEffort)
-        .durability(rclcpp::DurabilityPolicy::Volatile);
-}
-
-rclcpp::QoS makeReliableQos()
-{
-    return rclcpp::QoS(rclcpp::KeepLast(10))
-        .reliability(rclcpp::ReliabilityPolicy::Reliable)
-        .durability(rclcpp::DurabilityPolicy::Volatile);
-}
-
-geometry_msgs::msg::Vector3 toMsg(const Vector3& v)
-{
-    geometry_msgs::msg::Vector3 msg;
-    msg.x = v.x();
-    msg.y = v.y();
-    msg.z = v.z();
-    return msg;
-}
-
-}  // namespace
-
+// ROS2 节点只负责三件事：
+// 1) 收集各 UAV 与 payload 的最新状态；
+// 2) 在定时器里拼装控制输入并调用 SwarmPlannerCore；
+// 3) 将结果和调试信息发布出去。
 class SwarmPlannerNode : public rclcpp::Node
 {
 public:
     explicit SwarmPlannerNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
         : rclcpp::Node("swarm_planner", options)
     {
+        // 所有参数在构造时一次性声明并读取，便于节点启动后保持行为稳定。
         const PlannerNodeParams params = loadPlannerNodeParams(*this);
-
         px4_ns_ = params.px4_ns;
         self_index_ = params.self_index;
         mass_ = params.mass;
@@ -66,10 +42,12 @@ public:
             RCLCPP_WARN(get_logger(), "SwarmPlannerCore initialization failed");
         }
 
+        // state_actions_ 负责把异步回调里的原始消息缓存成“当前可计算快照”。
         state_actions_.configure(params.state_actions);
 
         initializePublishers(params.output_topic);
         initializeSubscriptions(params.payload_navsat_topic);
+        
         const auto period = std::chrono::microseconds(
             static_cast<int64_t>(1'000'000.0 / std::max(1.0, compute_hz_)));
         timer_ = create_wall_timer(period, std::bind(&SwarmPlannerNode::computeAndPublish, this));
@@ -84,18 +62,21 @@ public:
 private:
     void initializePublishers(const std::string& output_topic)
     {
+        // 期望加速度给下游飞控使用，debug 话题仅用于诊断和可视化。
         desired_acc_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>(
-            output_topic, makeReliableQos());
+            output_topic, node_utils::makeReliableQos());
         debug_pub_ = create_publisher<swarm_planner::msg::SwarmPlannerDebug>(
-            "~/debug", makeReliableQos());
+            "~/debug", node_utils::makeReliableQos());
     }
 
     void initializeSubscriptions(const std::string& payload_navsat_topic)
     {
-        const auto px4_qos = makePx4Qos();
-        for (size_t i = 0; i < kPeerNamespaces.size(); ++i)
+        const auto px4_qos = node_utils::makePx4Qos();
+        for (size_t i = 0; i < node_utils::kPeerNamespaces.size(); ++i)
         {
-            const std::string peer_ns = kPeerNamespaces[i];
+            const std::string peer_ns = node_utils::kPeerNamespaces[i];
+            // 位置和速度分别来自 PX4 的 global/local topic：
+            // global 用于统一转换到 swarm NED 坐标，local 直接提供速度。
             peer_global_subs_[i] = create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
                 peer_ns + "/fmu/out/vehicle_global_position",
                 px4_qos,
@@ -112,8 +93,9 @@ private:
 
         payload_navsat_sub_ = create_subscription<sensor_msgs::msg::NavSatFix>(
             payload_navsat_topic,
-            makeReliableQos(),
+            node_utils::makeReliableQos(),
             [this](const sensor_msgs::msg::NavSatFix::SharedPtr msg) {
+                // payload 当前只依赖 GNSS；速度由工具层用相邻位置差分估计。
                 state_actions_.handlePayloadNavSat(msg);
             });
     }
@@ -123,11 +105,13 @@ private:
         const auto now = get_clock()->now();
         SwarmCmdSnapshot snapshot;
         std::string reason;
+        // 如果任一输入源超时，整拍跳过，避免把混合时刻的数据送进控制器。
         if (!state_actions_.getSnapshot(now, snapshot, reason))
         {
             return;
         }
 
+        // 将聚合后的快照复制成 core::Input，保证核心控制器与 ROS 消息类型完全解耦。
         control::SwarmPlannerCore::Input input;
         for (size_t i = 0; i < kNumUavs; ++i)
         {
@@ -141,6 +125,7 @@ private:
         input.previous_thrust_vector = last_thrust_vector_;
         input.self_index = self_index_;
         input.mass = mass_;
+        // input.dt 仅作为 debug / 兼容信息保留；当前 core 内部实际使用固定离散步长。
         input.dt = last_compute_stamp_.nanoseconds() > 0
             ? (now - last_compute_stamp_).seconds()
             : 0.0;
@@ -151,15 +136,11 @@ private:
             return;
         }
 
-        geometry_msgs::msg::Vector3Stamped msg;
-        msg.header.stamp = now;
-        msg.header.frame_id = "ned";
-        msg.vector.x = output.desired_acceleration.x();
-        msg.vector.y = output.desired_acceleration.y();
-        msg.vector.z = output.desired_acceleration.z();
+        auto msg = node_utils::makeVector3StampedMsg(now, output.desired_acceleration);
         desired_acc_pub_->publish(msg);
         publishDebug(now, output);
 
+        // 上一拍推力会在下一拍 CFO 估计中使用，因此这里要把本拍输出反推成推力向量缓存下来。
         last_thrust_vector_ =
             Vector3(0.0, 0.0, mass_ * gravity_) - mass_ * output.desired_acceleration;
         last_compute_stamp_ = now;
@@ -172,51 +153,11 @@ private:
         if (debug_pub_->get_subscription_count() == 0 &&
             debug_pub_->get_intra_process_subscription_count() == 0)
         {
+            // 调试消息体较大，没有订阅者时直接跳过，减少拷贝和序列化开销。
             return;
         }
 
-        const auto& debug = output.debug;
-        swarm_planner::msg::SwarmPlannerDebug msg;
-        msg.header.stamp = now;
-        msg.header.frame_id = "ned";
-        msg.self_index = debug.self_index;
-        msg.mass = debug.mass;
-        msg.dt_input = debug.dt_input;
-        msg.dt_used = debug.dt_used;
-        msg.dt_valid_for_update = debug.dt_valid_for_update;
-        msg.structure_locked = debug.structure_locked;
-        msg.used_cfo = debug.used_cfo;
-        msg.valid = debug.valid;
-        msg.payload_position_ned = toMsg(debug.payload_position_ned);
-        msg.payload_velocity_ned = toMsg(debug.payload_velocity_ned);
-        msg.payload_target_ned = toMsg(debug.payload_target_ned);
-        msg.previous_thrust_vector = toMsg(debug.previous_thrust_vector);
-
-        for (size_t i = 0; i < kNumUavs; ++i)
-        {
-            msg.uav_positions_ned[i] = toMsg(debug.uav_positions_ned[i]);
-            msg.uav_velocities_ned[i] = toMsg(debug.uav_velocities_ned[i]);
-            msg.beta[i] = debug.beta[i];
-        }
-
-        for (size_t i = 0; i < debug.virtual_positions_ned.size(); ++i)
-        {
-            msg.virtual_positions_ned[i] = toMsg(debug.virtual_positions_ned[i]);
-            msg.virtual_velocities_ned[i] = toMsg(debug.virtual_velocities_ned[i]);
-        }
-
-        for (size_t i = 0; i < debug.rest_lengths.size(); ++i)
-        {
-            msg.rest_lengths[i] = debug.rest_lengths[i];
-        }
-
-        msg.passive_force = toMsg(debug.passive_force);
-        msg.tracking_input = toMsg(debug.tracking_input);
-        msg.virtual_acceleration = toMsg(debug.virtual_acceleration);
-        msg.mapped_acceleration = toMsg(debug.mapped_acceleration);
-        msg.cfo_acceleration = toMsg(debug.cfo_acceleration);
-        msg.desired_acceleration = toMsg(debug.desired_acceleration);
-        debug_pub_->publish(std::move(msg));
+        debug_pub_->publish(node_utils::makeDebugMsg(now, output.debug));
     }
 
     control::SwarmPlannerCore core_{};
@@ -227,6 +168,7 @@ private:
     double gravity_{9.81};
     double compute_hz_{200.0};
     Vector3 target_ned_{Vector3::Zero()};
+    // 下面两个成员共同提供“上一拍控制输入”的记忆，用于 CFO 更新。
     rclcpp::Time last_compute_stamp_{0, 0, RCL_ROS_TIME};
     Vector3 last_thrust_vector_{Vector3::Zero()};
     rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr desired_acc_pub_;

@@ -97,7 +97,6 @@ public:
 
     bool initialize(const Config& cfg);
     void reset();
-    void resetStructureReference();
     bool compute(const Input& input, Output& output);
 
     bool structureLocked() const { return structure_locked_; }
@@ -123,8 +122,7 @@ private:
     static bool finiteVector(const Vector3& v);
     static double sat(double x);
     static Vector3 clipNorm(const Vector3& v, double max_norm);
-    void clearRuntimeState();
-    bool applyConfiguredRestLengths();
+    bool loadAndValidateRestLengths();
     bool validateInput(const Input& input) const;
     VirtualState buildVirtualState(const Input& input, double h_u) const;
     Vector3 computePassiveNetworkForce(int self_index, const VirtualState& state) const;

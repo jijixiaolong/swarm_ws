@@ -14,13 +14,14 @@ import matplotlib.gridspec as gridspec
 from matplotlib.collections import LineCollection
 from scipy.spatial.transform import Rotation
 
+import sys
+import argparse
 import warnings
 warnings.filterwarnings('ignore')
 
-# ── paths ──────────────────────────────────────────────────────────────────────
-CSV_DIR  = os.path.dirname(os.path.abspath(__file__)) + "/csv"
-OUT_DIR  = os.path.dirname(os.path.abspath(__file__)) + "/plots"
-os.makedirs(OUT_DIR, exist_ok=True)
+# Paths: set in main from command-line (analysis directory that contains csv/)
+CSV_DIR = None
+OUT_DIR = None
 
 UAV_IDS    = [1, 2, 3]
 UAV_COLORS = {1: "#E74C3C", 2: "#2ECC71", 3: "#3498DB"}
@@ -740,7 +741,29 @@ def plot_dashboard():
 
 # ── main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"Output dir: {OUT_DIR}\n")
+    parser = argparse.ArgumentParser(
+        description="Generate swarm flight analysis plots from CSV data."
+    )
+    parser.add_argument(
+        "analysis_dir",
+        type=str,
+        help="Path to the analysis directory (must contain a 'csv' subfolder). "
+             "Plots will be written to analysis_dir/plots/",
+    )
+    args = parser.parse_args()
+    analysis_dir = os.path.abspath(args.analysis_dir)
+    if not os.path.isdir(analysis_dir):
+        print(f"Error: not a directory: {analysis_dir}", file=sys.stderr)
+        sys.exit(1)
+    # set global paths used by helper functions
+    CSV_DIR = os.path.join(analysis_dir, "csv")
+    OUT_DIR = os.path.join(analysis_dir, "plots")
+    if not os.path.isdir(CSV_DIR):
+        print(f"Error: CSV folder not found: {CSV_DIR}", file=sys.stderr)
+        sys.exit(1)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    print(f"CSV dir:  {CSV_DIR}")
+    print(f"Output:   {OUT_DIR}\n")
     plot_dashboard()
     plot_3d_trajectory()
     plot_xy_trajectory()

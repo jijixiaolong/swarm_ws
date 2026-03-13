@@ -8,9 +8,9 @@
     gravity: 9.81
     compute_hz: 200.0
 
-    target_x_m: 5.0
-    target_y_m: 0.0
-    target_z_m: -2.0
+    target_x_m: 1.0
+    target_y_m: 1.0
+    target_z_m: -4.0
 
     swarm_origin.latitude_deg: 47.397742
     swarm_origin.longitude_deg: 8.545594
