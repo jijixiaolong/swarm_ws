@@ -18,10 +18,8 @@ swarm_planner::control::SwarmPlannerCore::Input makeInput()
     input.payload_position_ned = swarm_planner::Vector3::Zero();
     input.payload_velocity_ned = swarm_planner::Vector3::Zero();
     input.payload_target_ned = swarm_planner::Vector3(0.0, 0.0, -2.0);
-    input.previous_thrust_vector = swarm_planner::Vector3::Zero();
     input.self_index = 0;
     input.mass = 2.0;
-    input.dt = 0.01;
     return input;
 }
 
@@ -35,11 +33,6 @@ swarm_planner::control::SwarmPlannerCore::Config makeConfig()
         0.55, 0.60, 0.59, 0.0, 1.0,
         1.14, 1.17, 1.16, 1.0, 0.0};
     return cfg;
-}
-
-bool finiteVector(const swarm_planner::Vector3& v)
-{
-    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
 }
 
 }  // namespace
@@ -69,25 +62,40 @@ TEST(SwarmPlannerCoreTest, ProducesFiniteAccelerationAndUsesConfiguredStructure)
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
     EXPECT_TRUE(output.valid);
-    EXPECT_TRUE(core.structureLocked());
-    EXPECT_TRUE(finiteVector(output.desired_acceleration));
+    EXPECT_TRUE(core.ready());
+    EXPECT_TRUE(output.desired_acceleration.allFinite());
 }
 
 TEST(SwarmPlannerCoreTest, ResetPreservesConfiguredStructureReference)
 {
     swarm_planner::control::SwarmPlannerCore core;
     auto cfg = makeConfig();
+    cfg.spring_k = 0.0;
+    cfg.damping_c1 = 0.0;
+    cfg.friction_c2 = 0.0;
+    cfg.vel_pid_kp = 1.0;
+    cfg.vel_pid_ki = 0.0;
+    cfg.vel_pid_kd = 0.0;
+    cfg.payload_kp = 0.0;
+    cfg.payload_ki = 2.0;
+    cfg.acc_norm_limit_m_s2 = 10.0;
     ASSERT_TRUE(core.initialize(cfg));
 
     auto input = makeInput();
+    input.payload_target_ned = swarm_planner::Vector3(1.0, 0.0, 0.0);
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
+    const double first_accel_x = output.desired_acceleration.x();
+    ASSERT_TRUE(core.compute(input, output));
+    const double second_accel_x = output.desired_acceleration.x();
+
     core.reset();
 
-    EXPECT_TRUE(core.initialized());
-    EXPECT_TRUE(core.structureLocked());
+    EXPECT_TRUE(core.ready());
     ASSERT_TRUE(core.compute(input, output));
     EXPECT_TRUE(output.valid);
+    EXPECT_GT(second_accel_x, first_accel_x);
+    EXPECT_NEAR(output.desired_acceleration.x(), first_accel_x, 1e-6);
 }
 
 TEST(SwarmPlannerCoreTest, UsesConfiguredRestLengthsOverrideWhenProvided)
@@ -101,7 +109,7 @@ TEST(SwarmPlannerCoreTest, UsesConfiguredRestLengthsOverrideWhenProvided)
         5.0, 8.0, 10.0, 0.0, 1.0,
         6.0, 9.0, 11.0, 1.0, 0.0};
     ASSERT_TRUE(core.initialize(cfg));
-    EXPECT_TRUE(core.structureLocked());
+    EXPECT_TRUE(core.ready());
 
     auto input = makeInput();
     swarm_planner::control::SwarmPlannerCore::Output output;
@@ -117,37 +125,6 @@ TEST(SwarmPlannerCoreTest, RejectsMalformedRestLengthsOverride)
     auto cfg = makeConfig();
     cfg.rest_lengths_override = {0.0, 1.0, 2.0};
     EXPECT_FALSE(core.initialize(cfg));
-}
-
-TEST(SwarmPlannerCoreTest, CFOOffKeepsUsedFlagFalse)
-{
-    swarm_planner::control::SwarmPlannerCore core;
-    auto cfg = makeConfig();
-    cfg.cfo.enable = false;
-    ASSERT_TRUE(core.initialize(cfg));
-
-    auto input = makeInput();
-    swarm_planner::control::SwarmPlannerCore::Output output;
-    ASSERT_TRUE(core.compute(input, output));
-    EXPECT_FALSE(output.used_cfo);
-}
-
-TEST(SwarmPlannerCoreTest, UsesFixedDtEvenWhenInputDtIsOutOfRange)
-{
-    swarm_planner::control::SwarmPlannerCore core;
-    auto cfg = makeConfig();
-    cfg.cfo.enable = true;
-    ASSERT_TRUE(core.initialize(cfg));
-
-    auto input = makeInput();
-    input.dt = 1.0;
-    swarm_planner::control::SwarmPlannerCore::Output output;
-    ASSERT_TRUE(core.compute(input, output));
-    EXPECT_TRUE(output.valid);
-    EXPECT_TRUE(output.used_cfo);
-    EXPECT_DOUBLE_EQ(output.debug.dt_input, 1.0);
-    EXPECT_DOUBLE_EQ(output.debug.dt_used, 1.0 / 200.0);
-    EXPECT_TRUE(output.debug.dt_valid_for_update);
 }
 
 TEST(SwarmPlannerCoreTest, MappingScalesVirtualAccelerationByBeta)
@@ -200,4 +177,81 @@ TEST(SwarmPlannerCoreTest, AppliesAccelerationNormLimit)
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
     EXPECT_LE(output.desired_acceleration.norm(), cfg.acc_norm_limit_m_s2 + 1e-6);
+}
+
+TEST(SwarmPlannerCoreTest, RejectsDegeneratePayloadUavHeight)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    input.payload_position_ned.z() = input.uav_positions_ned[0].z();
+
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    EXPECT_FALSE(core.compute(input, output));
+}
+
+TEST(SwarmPlannerCoreTest, PayloadPositionIntegralBuildsDesiredAccelerationForStaticOffset)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    auto cfg = makeConfig();
+    cfg.spring_k = 0.0;
+    cfg.damping_c1 = 0.0;
+    cfg.friction_c2 = 0.0;
+    cfg.vel_pid_kp = 1.0;
+    cfg.vel_pid_ki = 0.0;
+    cfg.vel_pid_kd = 0.0;
+    cfg.payload_kp = 0.0;
+    cfg.payload_ki = 2.0;
+    cfg.acc_norm_limit_m_s2 = 10.0;
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    input.payload_target_ned = swarm_planner::Vector3(1.0, 0.0, 0.0);
+
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_NEAR(output.desired_acceleration.x(), 0.005, 1e-6);
+    EXPECT_NEAR(output.desired_acceleration.y(), 0.0, 1e-6);
+    EXPECT_NEAR(output.desired_acceleration.z(), 0.0, 1e-6);
+
+    ASSERT_TRUE(core.compute(input, output));
+    EXPECT_NEAR(output.desired_acceleration.x(), 0.01, 1e-6);
+}
+
+TEST(SwarmPlannerCoreTest, PayloadGravityFeedforwardShiftsDesiredAccelerationUpward)
+{
+    using Core = swarm_planner::control::SwarmPlannerCore;
+    Core core_no_ff, core_ff;
+
+    auto cfg = makeConfig();
+    cfg.spring_k = 0.0;
+    cfg.damping_c1 = 0.0;
+    cfg.friction_c2 = 0.0;
+    cfg.vel_pid_kp = 2.0;
+    cfg.vel_pid_ki = 0.0;
+    cfg.vel_pid_kd = 0.0;
+    cfg.payload_kp = 1.2;
+    cfg.acc_norm_limit_m_s2 = 20.0;
+
+    auto cfg_ff = cfg;
+    cfg_ff.payload_mass = 1.5;
+
+    ASSERT_TRUE(core_no_ff.initialize(cfg));
+    ASSERT_TRUE(core_ff.initialize(cfg_ff));
+
+    auto input = makeInput();
+    Core::Output out_no_ff, out_ff;
+    ASSERT_TRUE(core_no_ff.compute(input, out_no_ff));
+    ASSERT_TRUE(core_ff.compute(input, out_ff));
+
+    // payload_mass > 0 时 z 分量应更小（NED 更负 = 更向上）
+    EXPECT_LT(out_ff.desired_acceleration.z(), out_no_ff.desired_acceleration.z());
+
+    // 前馈量 = -payload_mass * gravity / (kNumUavs * uav_mass)
+    const double expected_ff = -cfg_ff.payload_mass * cfg_ff.gravity
+                               / (Core::kNumUavs * input.mass);
+    const double actual_shift = out_ff.desired_acceleration.z() - out_no_ff.desired_acceleration.z();
+    EXPECT_NEAR(actual_shift, expected_ff, 1e-4);
 }

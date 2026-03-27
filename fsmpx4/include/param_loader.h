@@ -3,6 +3,9 @@
 
 #include <memory>
 #include <string>
+#include <vector>
+
+#include "swarm_planner/planner_core.h"
 
 namespace rclcpp {
 class Node;
@@ -67,17 +70,25 @@ struct FSMParams
         double disarm_command_hold_s;
     } land;
 
-    struct Command {
-        double timeout_s;
-        std::string acceleration_topic;
-    } command;
-
     struct VehicleCommand {
         int target_system_id;
         int target_component_id;
         int source_system_id;
         int source_component_id;
     } vehicle_command;
+
+    struct Swarm {
+        std::vector<std::string> uav_namespaces;
+        int self_index;
+        double mass;
+        swarm_planner::Vector3 target_ned;
+        std::string payload_global_position_topic;
+        std::string payload_local_position_topic;
+        double data_timeout_s;
+        double rope_length_m;
+        double rope_taut_fraction;
+        swarm_planner::control::SwarmPlannerCore::Config core;
+    } swarm;
 
     FSMParams();
 

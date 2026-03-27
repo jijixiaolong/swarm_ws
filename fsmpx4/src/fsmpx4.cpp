@@ -1,10 +1,13 @@
 #include "fsmpx4.h"
 
 #include <algorithm>
-#include <chrono>
-#include <cstdint>
 #include <cmath>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <string_view>
+
+#include <geometry_msgs/msg/vector3.hpp>
 
 namespace fsmpx4
 {
@@ -24,14 +27,29 @@ constexpr std::string_view toString(FSMPX4::State state)
     return "UNKNOWN";
 }
 
-double clampNormalizedThrust(double thrust, double min_thrust, double max_thrust)
+constexpr uint8_t toDebugState(FSMPX4::State state)
 {
-    double clamped_min = std::min(min_thrust, max_thrust);
-    if (!std::isfinite(clamped_min)) clamped_min = -1.0;
-    clamped_min = std::clamp(clamped_min, -1.0, 0.0);
+    switch (state)
+    {
+        case FSMPX4::State::MANUAL_CTRL: return fsmpx4::msg::FSMDebug::STATE_MANUAL_CTRL;
+        case FSMPX4::State::OFFBOARD_STABILIZED: return fsmpx4::msg::FSMDebug::STATE_OFFBOARD_STABILIZED;
+        case FSMPX4::State::AUTO_TAKEOFF: return fsmpx4::msg::FSMDebug::STATE_AUTO_TAKEOFF;
+        case FSMPX4::State::AUTO_HOVER: return fsmpx4::msg::FSMDebug::STATE_AUTO_HOVER;
+        case FSMPX4::State::AUTO_LAND: return fsmpx4::msg::FSMDebug::STATE_AUTO_LAND;
+        case FSMPX4::State::CMD_CTRL: return fsmpx4::msg::FSMDebug::STATE_CMD_CTRL;
+    }
+    return fsmpx4::msg::FSMDebug::STATE_MANUAL_CTRL;
+}
 
-    const double finite_thrust = std::isfinite(thrust) ? thrust : 0.0;
-    return std::clamp(finite_thrust, clamped_min, 0.0);
+
+
+geometry_msgs::msg::Vector3 toVector3Msg(const swarm_planner::Vector3& v)
+{
+    geometry_msgs::msg::Vector3 msg;
+    msg.x = v.x();
+    msg.y = v.y();
+    msg.z = v.z();
+    return msg;
 }
 }  // namespace
 
@@ -51,6 +69,7 @@ FSMPX4::FSMPX4(const rclcpp::NodeOptions& options)
     px4_ns_prefix_ = params_.basic.px4_ns;
     if (param_loaded) logLoadedParams();
 
+    // GPS Origin
     position_input_.setGpsOrigin(
         params_.position.gps_origin_latitude_deg,
         params_.position.gps_origin_longitude_deg,
@@ -61,6 +80,8 @@ FSMPX4::FSMPX4(const rclcpp::NodeOptions& options)
     {
         RCLCPP_WARN(get_logger(), "GPS原点仍为默认值(0,0,0)，请在 YAML 中填写实际参考点");
     }
+
+    // Hover Thrust
     current_state_->hover_thrust = params_.thr_map.hover_percentage;
 
     // Controller
@@ -68,6 +89,8 @@ FSMPX4::FSMPX4(const rclcpp::NodeOptions& options)
     ctrl_cfg.load_from_params(params_);
     if (!controller_.initialize(ctrl_cfg))
         RCLCPP_WARN(get_logger(), "Controller initialization failed");
+    if (!swarm_core_.initialize(params_.swarm.core))
+        RCLCPP_WARN(get_logger(), "SwarmPlannerCore initialization failed");
 
     initializePublishers();
     initializeSubscribers();
@@ -95,6 +118,8 @@ void FSMPX4::initializePublishers()
 
     debug_pub_ = create_publisher<fsmpx4::msg::FSMDebug>("~/debug",
         rclcpp::QoS(10).reliable());
+    swarm_debug_pub_ = create_publisher<swarm_planner::msg::SwarmPlannerDebug>(
+        "swarm_planner/debug", rclcpp::QoS(10).reliable());
 }
 
 void FSMPX4::initializeSubscribers()
@@ -149,17 +174,95 @@ void FSMPX4::initializeSubscribers()
             RCLCPP_INFO(get_logger(), "LAND trigger %s", msg->data ? "latched" : "canceled");
         });
 
-    const auto planner_qos = rclcpp::QoS(rclcpp::KeepLast(10))
-        .reliability(rclcpp::ReliabilityPolicy::Reliable)
-        .durability(rclcpp::DurabilityPolicy::Volatile);
-    const std::string planner_topic = params_.command.acceleration_topic.empty()
-        ? (px4_ns_prefix_.empty() ? "/planner/desired_acceleration" : px4_ns_prefix_ + "/planner/desired_acceleration")
-        : params_.command.acceleration_topic;
-    planner_acceleration_sub_ = create_subscription<geometry_msgs::msg::Vector3Stamped>(
-        planner_topic, planner_qos,
-        [this](const geometry_msgs::msg::Vector3Stamped::SharedPtr msg) {
-            planner_acceleration_.update(*msg, get_clock()->now());
-        });
+    swarm_planner::geo::GpsOrigin swarm_origin;
+    swarm_origin.set(
+        params_.position.gps_origin_latitude_deg,
+        params_.position.gps_origin_longitude_deg,
+        params_.position.gps_origin_altitude_m);
+
+    size_t sub_slot = 0;
+    for (size_t i = 0; i < swarm_planner::kNumUavs; ++i)
+    {
+        if (static_cast<int>(i) == params_.swarm.self_index)
+        {
+            continue;
+        }
+
+        const std::string& ns = params_.swarm.uav_namespaces[i];
+        uav_global_subs_[sub_slot] =
+            create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+                ns + "/fmu/out/vehicle_global_position",
+                px4_qos,
+                [this, i, swarm_origin](
+                    const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg) {
+                    if (!msg->lat_lon_valid || !msg->alt_valid)
+                    {
+                        return;
+                    }
+
+                    Kinematics kinematics = swarm_state_.uavs[i].value;
+                    kinematics.pos =
+                        swarm_planner::geo::lla_to_ned(msg->lat, msg->lon, msg->alt, swarm_origin);
+                    swarm_state_.uavs[i].update(kinematics, get_clock()->now());
+                });
+
+        uav_local_subs_[sub_slot] =
+            create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+                ns + "/fmu/out/vehicle_local_position",
+                px4_qos,
+                [this, i](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
+                    if (!msg->v_xy_valid || !msg->v_z_valid)
+                    {
+                        return;
+                    }
+
+                    Kinematics kinematics = swarm_state_.uavs[i].value;
+                    kinematics.vel = swarm_planner::Vector3(msg->vx, msg->vy, msg->vz);
+                    swarm_state_.uavs[i].update(kinematics, get_clock()->now());
+                });
+        ++sub_slot;
+    }
+
+    if (params_.swarm.payload_global_position_topic.empty() ||
+        params_.swarm.payload_local_position_topic.empty())
+    {
+        RCLCPP_ERROR(
+            get_logger(),
+            "载荷 PX4 话题未配置: global='%s' local='%s'",
+            params_.swarm.payload_global_position_topic.c_str(),
+            params_.swarm.payload_local_position_topic.c_str());
+    }
+    else
+    {
+        load_global_sub_ = create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+            params_.swarm.payload_global_position_topic,
+            px4_qos,
+            [this, swarm_origin](const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg) {
+                if (!msg->lat_lon_valid || !msg->alt_valid)
+                {
+                    return;
+                }
+
+                Kinematics kinematics = swarm_state_.load.value;
+                kinematics.pos =
+                    swarm_planner::geo::lla_to_ned(msg->lat, msg->lon, msg->alt, swarm_origin);
+                swarm_state_.load.update(kinematics, get_clock()->now());
+            });
+
+        load_local_sub_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+            params_.swarm.payload_local_position_topic,
+            px4_qos,
+            [this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
+                if (!msg->v_xy_valid || !msg->v_z_valid)
+                {
+                    return;
+                }
+
+                Kinematics kinematics = swarm_state_.load.value;
+                kinematics.vel = swarm_planner::Vector3(msg->vx, msg->vy, msg->vz);
+                swarm_state_.load.update(kinematics, get_clock()->now());
+            });
+    }
 }
 
 //==============================================================================
@@ -168,9 +271,8 @@ void FSMPX4::initializeSubscribers()
 
 void FSMPX4::ControlLoop(double frequency_hz)
 {
-    const double freq = std::max(1.0, frequency_hz);
     control_timer_ = create_wall_timer(
-        std::chrono::microseconds(static_cast<int64_t>(1'000'000.0 / freq)),
+        std::chrono::microseconds(static_cast<int64_t>(1'000'000.0 / frequency_hz)),
         [this]() { process(); });
 }
 
@@ -180,6 +282,8 @@ void FSMPX4::process()
 
     output_ = {};  output_.timestamp = now.seconds();
     cmd_ = {};     cmd_.timestamp = now.seconds();
+    swarm_state_.uavs[params_.swarm.self_index].update(
+        {current_state_->position, current_state_->velocity}, now);
 
     checkTransitions(now);
     executeState(now);
@@ -243,9 +347,9 @@ void FSMPX4::checkTransitions(const rclcpp::Time& now)
             return;
         }
         const double elapsed = std::max(0.0, now.seconds() - takeoff_ctx_.start_time);
-        const double target_h = std::max(0.1, params_.takeoff.target_height_m);
+        const double target_h = params_.takeoff.target_height_m;
         const double climbed = takeoff_ctx_.start_pos.z() - current_state_->position.z();
-        if (climbed >= target_h || elapsed >= std::max(1.0, params_.takeoff.timeout_s))
+        if (climbed >= target_h || elapsed >= params_.takeoff.timeout_s)
         {
             RCLCPP_INFO(get_logger(), "AUTO_TAKEOFF done: %.2f/%.2fm %.1fs", climbed, target_h, elapsed);
             enterState(State::AUTO_HOVER);
@@ -260,11 +364,11 @@ void FSMPX4::checkTransitions(const rclcpp::Time& now)
             fallbackToManual("AUTO_HOVER fallback");
             return;
         }
-        const double planner_timeout_s = std::max(0.01, params_.command.timeout_s);
-        const bool planner_fresh = planner_acceleration_.fresh(now, planner_timeout_s);
         if (rc_input_.is_command_mode)
         {
-            if (planner_fresh)
+            swarm_planner::control::SwarmPlannerCore::Input input;
+            std::string reason;
+            if (buildSwarmInput(now, input, &reason))
             {
                 enterState(State::CMD_CTRL);
                 return;
@@ -272,7 +376,7 @@ void FSMPX4::checkTransitions(const rclcpp::Time& now)
             if (rc_input_.enter_command_mode)
             {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                                     "CMD_CTRL blocked: planner acceleration not ready");
+                                     "CMD_CTRL blocked: %s", reason.c_str());
             }
             break;
         }
@@ -296,7 +400,11 @@ void FSMPX4::checkTransitions(const rclcpp::Time& now)
             return;
         }
         if (!rc_input_.is_command_mode)
+        {
             enterState(State::AUTO_HOVER);
+            return;
+        }
+        // 数据新鲜度由 executeState 的 buildSwarmInput 统一检查，避免重复构建
         break;
     }
     }
@@ -319,9 +427,11 @@ void FSMPX4::executeState(const rclcpp::Time& now)
         toggleOffboardMode(true);
         publishOffboardMode(true);
         output_.Rd = rc_input_.getDesiredRotationMatrix();
+        output_.qd = types::Quaternion(output_.Rd);
+        output_.qd.normalize();
         output_.thrust = rc_input_.getDesiredThrust();
         output_.valid = true;
-        publishAttitudeCommand(output_.Rd, output_.thrust, now);
+        publishAttitudeCommand(output_.qd, output_.thrust, now);
         break;
 
     case State::AUTO_TAKEOFF:
@@ -329,9 +439,9 @@ void FSMPX4::executeState(const rclcpp::Time& now)
         toggleOffboardMode(true);
         publishOffboardMode(true);
 
-        const double speed = std::max(0.05, params_.takeoff.ascent_velocity_m_s);
-        const double target_h = std::max(0.1, params_.takeoff.target_height_m);
-        const double idle_s = std::max(0.0, params_.takeoff.idle_duration_s);
+        const double speed = params_.takeoff.ascent_velocity_m_s;
+        const double target_h = params_.takeoff.target_height_m;
+        const double idle_s = params_.takeoff.idle_duration_s;
         cmd_.yaw_desired = takeoff_ctx_.yaw;
         cmd_.b1d = types::Vector3(std::cos(cmd_.yaw_desired), std::sin(cmd_.yaw_desired), 0.0);
 
@@ -339,10 +449,6 @@ void FSMPX4::executeState(const rclcpp::Time& now)
         {
             // Motor warm-up phase
             const double dt = now.seconds() - takeoff_ctx_.start_time;
-            // px4ctrl starts at -7 and ramps to 0. Our controller adds gravity (approx 9.8).
-            // To start at 0 thrust, we need des_a_z = +gravity (downwards acceleration).
-            // To reach hover thrust, we need des_a_z = 0.
-            // Let's use an exponential curve that starts at +gravity and decays to 0.
             const double g = params_.physical.gravity;
             double des_a_z = g * std::exp(-5.0 * dt / idle_s);
 
@@ -355,7 +461,6 @@ void FSMPX4::executeState(const rclcpp::Time& now)
             // Linear climb phase
             const double elapsed = std::max(0.0, now.seconds() - takeoff_ctx_.start_time - idle_s);
             const double climb = std::min(speed * elapsed, target_h);
-
             cmd_.position = takeoff_ctx_.start_pos;
             cmd_.position.z() -= climb;  // NED: 向上为负
             cmd_.velocity = types::Vector3(0, 0, climb < target_h ? -speed : 0);
@@ -364,7 +469,7 @@ void FSMPX4::executeState(const rclcpp::Time& now)
 
         output_ = controller_.computeControl(*current_state_, cmd_);
         if (output_.valid)
-            publishAttitudeCommand(output_.Rd, output_.thrust, now);
+            publishAttitudeCommand(output_.qd, output_.thrust, now);
         break;
     }
 
@@ -382,13 +487,15 @@ void FSMPX4::executeState(const rclcpp::Time& now)
                         hover_ctx_.position.x(), hover_ctx_.position.y(), hover_ctx_.position.z(), hover_ctx_.yaw);
         }
 
+        // AUTO_HOVER 始终使用 fsmpx4 自身的位置控制器，不再切换到 swarm planner 输出。
         cmd_.position = hover_ctx_.position;
+        cmd_.velocity = types::Vector3::Zero();
+        cmd_.acceleration = types::Vector3::Zero();
         cmd_.yaw_desired = hover_ctx_.yaw;
         cmd_.b1d = types::Vector3(std::cos(cmd_.yaw_desired), std::sin(cmd_.yaw_desired), 0.0);
-
         output_ = controller_.computeControl(*current_state_, cmd_);
         if (output_.valid)
-            publishAttitudeCommand(output_.Rd, output_.thrust, now);
+            publishAttitudeCommand(output_.qd, output_.thrust, now);
         break;
     }
 
@@ -397,9 +504,9 @@ void FSMPX4::executeState(const rclcpp::Time& now)
         publishOffboardMode(false);
         if (land_ctx_.completed) break;
 
-        const double land_resend = std::max(0.01, params_.land.command_resend_interval_s);
-        const double disarm_resend = std::max(0.01, params_.land.disarm_command_resend_interval_s);
-        const double disarm_hold = std::max(0.0, params_.land.disarm_command_hold_s);
+        const double land_resend = params_.land.command_resend_interval_s;
+        const double disarm_resend = params_.land.disarm_command_resend_interval_s;
+        const double disarm_hold = params_.land.disarm_command_hold_s;
 
         if (!land_ctx_.disarm_active)
         {
@@ -450,18 +557,35 @@ void FSMPX4::executeState(const rclcpp::Time& now)
         toggleOffboardMode(true);
         publishOffboardMode(true);
 
-        const double planner_timeout_s = std::max(0.01, params_.command.timeout_s);
-        if (!planner_acceleration_.fresh(now, planner_timeout_s))
+        swarm_planner::control::SwarmPlannerCore::Input input;
+        swarm_planner::control::SwarmPlannerCore::Output swarm_output;
+        std::string build_reason;
+        if (!buildSwarmInput(now, input, &build_reason))
         {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                1000,
+                "CMD_CTRL swarm input unavailable: %s",
+                build_reason.c_str());
+            enterState(State::AUTO_HOVER);
+            return;
+        }
+        if (!swarm_core_.compute(input, swarm_output) || !swarm_output.valid)
+        {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                1000,
+                "CMD_CTRL swarm planner compute failed, fallback to AUTO_HOVER");
             enterState(State::AUTO_HOVER);
             return;
         }
 
-        const auto& planner_acceleration = planner_acceleration_.value;
         cmd_.acceleration = types::Vector3(
-            planner_acceleration.vector.x,
-            planner_acceleration.vector.y,
-            planner_acceleration.vector.z);
+            swarm_output.desired_acceleration.x(),
+            swarm_output.desired_acceleration.y(),
+            swarm_output.desired_acceleration.z());
         cmd_.yaw_desired = std::atan2(current_state_->rotation(1, 0), current_state_->rotation(0, 0));
         cmd_.b1d = types::Vector3(std::cos(cmd_.yaw_desired), std::sin(cmd_.yaw_desired), 0.0);
 
@@ -469,8 +593,9 @@ void FSMPX4::executeState(const rclcpp::Time& now)
             *current_state_, cmd_.acceleration, cmd_.yaw_desired, cmd_.b1d);
         if (output_.valid)
         {
-            publishAttitudeCommand(output_.Rd, output_.thrust, now);
+            publishAttitudeCommand(output_.qd, output_.thrust, now);
         }
+        publishSwarmDebugMessage(now, swarm_output.debug);
         break;
     }
     }
@@ -502,7 +627,10 @@ void FSMPX4::enterState(State next_state)
         }
         case State::AUTO_HOVER:   hover_ctx_.reset();   break;
         case State::AUTO_LAND:    land_ctx_.reset();     break;
-        case State::CMD_CTRL:     break;
+        case State::CMD_CTRL:
+            swarm_core_.reset();
+            cmd_ctx_.reset();
+            break;
         default: break;
     }
     state_ = next_state;
@@ -519,10 +647,52 @@ bool FSMPX4::positionReady(const rclcpp::Time& now)
     return position_input_.positionFresh(now) && position_input_.velocityFresh(now);
 }
 
+bool FSMPX4::buildSwarmInput(
+    const rclcpp::Time& now,
+    swarm_planner::control::SwarmPlannerCore::Input& input,
+    std::string* reason) const
+{
+    for (size_t i = 0; i < swarm_planner::kNumUavs; ++i)
+    {
+        if (!swarm_state_.uavs[i].fresh(now, params_.swarm.data_timeout_s))
+        {
+            if (reason)
+            {
+                *reason = "uav state timeout idx=" + std::to_string(i);
+            }
+            return false;
+        }
+
+        input.uav_positions_ned[i] = swarm_state_.uavs[i].value.pos;
+        input.uav_velocities_ned[i] = swarm_state_.uavs[i].value.vel;
+    }
+
+    if (!swarm_state_.load.fresh(now, params_.swarm.data_timeout_s))
+    {
+        if (reason)
+        {
+            *reason = "payload state timeout";
+        }
+        return false;
+    }
+
+    input.payload_position_ned = swarm_state_.load.value.pos;
+    input.payload_velocity_ned = swarm_state_.load.value.vel;
+    input.payload_target_ned = params_.swarm.target_ned;
+    input.self_index = params_.swarm.self_index;
+    input.mass = params_.swarm.mass;
+
+    if (reason)
+    {
+        reason->clear();
+    }
+    return true;
+}
+
 bool FSMPX4::landDetectedReady(const rclcpp::Time& now) const
 {
     if (!land_detected_received_) return false;
-    return (now - land_detected_stamp_).seconds() <= std::max(0.05, params_.land.detected_ready_timeout_s);
+    return (now - land_detected_stamp_).seconds() <= params_.land.detected_ready_timeout_s;
 }
 
 void FSMPX4::fallbackToManual(const char* reason)
@@ -583,9 +753,9 @@ bool FSMPX4::toggleOffboardMode(bool on_off)
 }
 
 void FSMPX4::publishAttitudeCommand(
-    const types::Matrix3& attitude, double thrust, const rclcpp::Time& stamp)
+    const types::Quaternion& attitude, double thrust, const rclcpp::Time& stamp)
 {
-    const types::Quaternion q(attitude);
+    types::Quaternion q = attitude.normalized();
     px4_msgs::msg::VehicleAttitudeSetpoint msg{};
     msg.timestamp = stamp.nanoseconds() / 1000;
     msg.q_d[0] = static_cast<float>(q.w());
@@ -593,10 +763,7 @@ void FSMPX4::publishAttitudeCommand(
     msg.q_d[2] = static_cast<float>(q.y());
     msg.q_d[3] = static_cast<float>(q.z());
 
-    msg.thrust_body[2] = static_cast<float>(clampNormalizedThrust(
-        thrust,
-        params_.limits.min_thrust,
-        params_.limits.max_thrust));
+    msg.thrust_body[2] = static_cast<float>(thrust);
     attitude_pub_->publish(msg);
 }
 
@@ -615,6 +782,8 @@ void FSMPX4::publishDebugMessage(const rclcpp::Time& stamp)
     fsmpx4::msg::FSMDebug msg;
     msg.header.stamp = stamp;
     msg.header.frame_id = get_fully_qualified_name();
+    msg.fsm_state = toDebugState(state_);
+    msg.fsm_state_name = std::string(toString(state_));
 
     const auto& s = *current_state_;
     msg.uav_position.x = s.position.x();
@@ -661,8 +830,7 @@ void FSMPX4::publishDebugMessage(const rclcpp::Time& stamp)
     msg.control_acceleration.y = output_.A.y();
     msg.control_acceleration.z = output_.A.z();
 
-    Eigen::Quaterniond q(output_.Rd);
-    q.normalize();
+    const Eigen::Quaterniond q = output_.qd.normalized();
     msg.cmd_attitude.w = q.w();
     msg.cmd_attitude.x = q.x();
     msg.cmd_attitude.y = q.y();
@@ -676,6 +844,53 @@ void FSMPX4::publishDebugMessage(const rclcpp::Time& stamp)
     debug_pub_->publish(std::move(msg));
 }
 
+void FSMPX4::publishSwarmDebugMessage(
+    const rclcpp::Time& stamp,
+    const swarm_planner::control::SwarmPlannerCore::DebugState& debug)
+{
+    if (swarm_debug_pub_->get_subscription_count() == 0 &&
+        swarm_debug_pub_->get_intra_process_subscription_count() == 0)
+    {
+        return;
+    }
+
+    swarm_planner::msg::SwarmPlannerDebug msg;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = "ned";
+    msg.self_index = debug.self_index;
+    msg.mass = debug.mass;
+    msg.structure_locked = debug.structure_locked;
+    msg.valid = debug.valid;
+    msg.payload_position_ned = toVector3Msg(debug.payload_position_ned);
+    msg.payload_velocity_ned = toVector3Msg(debug.payload_velocity_ned);
+    msg.payload_target_ned = toVector3Msg(debug.payload_target_ned);
+
+    for (size_t i = 0; i < swarm_planner::kNumUavs; ++i)
+    {
+        msg.uav_positions_ned[i] = toVector3Msg(debug.uav_positions_ned[i]);
+        msg.uav_velocities_ned[i] = toVector3Msg(debug.uav_velocities_ned[i]);
+        msg.beta[i] = debug.beta[i];
+    }
+
+    for (size_t i = 0; i < debug.virtual_positions_ned.size(); ++i)
+    {
+        msg.virtual_positions_ned[i] = toVector3Msg(debug.virtual_positions_ned[i]);
+        msg.virtual_velocities_ned[i] = toVector3Msg(debug.virtual_velocities_ned[i]);
+    }
+
+    for (size_t i = 0; i < debug.rest_lengths.size(); ++i)
+    {
+        msg.rest_lengths[i] = debug.rest_lengths[i];
+    }
+
+    msg.passive_force = toVector3Msg(debug.passive_force);
+    msg.tracking_input = toVector3Msg(debug.tracking_input);
+    msg.virtual_acceleration = toVector3Msg(debug.virtual_acceleration);
+    msg.mapped_acceleration = toVector3Msg(debug.mapped_acceleration);
+    msg.desired_acceleration = toVector3Msg(debug.desired_acceleration);
+    swarm_debug_pub_->publish(std::move(msg));
+}
+
 void FSMPX4::logLoadedParams() const
 {
     RCLCPP_INFO(get_logger(), "频率: %.0fHz 悬停: %.3f", params_.basic.ctrl_freq_max, params_.thr_map.hover_percentage);
@@ -686,6 +901,12 @@ void FSMPX4::logLoadedParams() const
     RCLCPP_INFO(get_logger(), "起飞: h=%.1fm v=%.1fm/s idle=%.1fs timeout=%.0fs",
                 params_.takeoff.target_height_m, params_.takeoff.ascent_velocity_m_s,
                 params_.takeoff.idle_duration_s, params_.takeoff.timeout_s);
+    RCLCPP_INFO(get_logger(), "编队: self=%d mass=%.2f target=(%.2f,%.2f,%.2f)",
+                params_.swarm.self_index, params_.swarm.mass,
+                params_.swarm.target_ned.x(), params_.swarm.target_ned.y(), params_.swarm.target_ned.z());
+    RCLCPP_INFO(get_logger(), "载荷: global=%s local=%s",
+                params_.swarm.payload_global_position_topic.c_str(),
+                params_.swarm.payload_local_position_topic.c_str());
     RCLCPP_INFO(get_logger(), "增益: Kp=(%.2f,%.2f,%.2f) Kv=(%.2f,%.2f,%.2f)",
                 params_.gains.Kp_x, params_.gains.Kp_y, params_.gains.Kp_z,
                 params_.gains.Kv_x, params_.gains.Kv_y, params_.gains.Kv_z);

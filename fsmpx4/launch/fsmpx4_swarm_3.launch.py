@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""3-UAV swarm launch: per-UAV fsmpx4 executor + swarm_planner."""
+"""3-UAV swarm launch: per-UAV fsmpx4 executor."""
 
 from datetime import datetime
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -20,8 +22,8 @@ UAV_CONFIGS = [
 
 def _bag_topics():
     topics = [
-        '/payload/navsat',
-        '/payload/vehicle_gps_position',
+        '/px4_4/fmu/out/vehicle_global_position',
+        '/px4_4/fmu/out/vehicle_local_position',
         '/swarm/land_trigger',
         '/rc/manual_control_setpoint',
     ]
@@ -31,7 +33,6 @@ def _bag_topics():
             f'/{ns}/rc/manual_control_setpoint',
             f'/{ns}/fsmpx4_fsm/debug',
             f'/{ns}/swarm_planner/debug',
-            f'/{ns}/planner/desired_acceleration',
             f'/{ns}/fmu/in/offboard_control_mode',
             f'/{ns}/fmu/in/vehicle_attitude_setpoint',
             f'/{ns}/fmu/in/vehicle_command',
@@ -80,10 +81,8 @@ def _maybe_start_bag_recording(context, *_args, **_kwargs):
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('fsmpx4')
-    planner_share = get_package_share_directory('swarm_planner')
     fsm_launch = os.path.join(pkg_share, 'launch', 'fsmpx4_fsm.launch.py')
-    planner_launch = os.path.join(planner_share, 'launch', 'swarm_planner.launch.py')
-    default_bag_root = '/home/jijixiaolong/swarm_ws/src/swarm_ws/data'
+    default_bag_root = os.path.expanduser('~/swarm_ws/src/data')
     default_bag_name = datetime.now().strftime('swarm_%Y%m%d_%H%M%S_%f')
 
     actions = [
@@ -112,7 +111,36 @@ def generate_launch_description():
             default_value='false',
             description='If true, use ros2 bag record -a instead of the curated experiment topic list',
         ),
+        DeclareLaunchArgument(
+            'enable_rviz_enu',
+            default_value='true',
+            description='If true, publish UAV/payload ENU markers and poses for RViz',
+        ),
+        DeclareLaunchArgument(
+            'rviz_fixed_frame',
+            default_value='map',
+            description='Fixed frame used by the ENU RViz bridge',
+        ),
+        DeclareLaunchArgument(
+            'rviz_publish_rate_hz',
+            default_value='20.0',
+            description='Publish rate of the ENU RViz bridge',
+        ),
         OpaqueFunction(function=_maybe_start_bag_recording),
+        Node(
+            package='fsmpx4',
+            executable='swarm_enu_rviz.py',
+            name='swarm_enu_rviz',
+            output='screen',
+            parameters=[
+                os.path.join(pkg_share, 'config', 'fsm.yaml'),
+                {
+                    'rviz.fixed_frame': LaunchConfiguration('rviz_fixed_frame'),
+                    'rviz.publish_rate_hz': LaunchConfiguration('rviz_publish_rate_hz'),
+                },
+            ],
+            condition=IfCondition(LaunchConfiguration('enable_rviz_enu')),
+        ),
     ]
     for px4_ns, sys_id, self_index in UAV_CONFIGS:
         node_namespace = px4_ns.lstrip('/')
@@ -121,13 +149,6 @@ def generate_launch_description():
             launch_arguments={
                 'px4_ns': px4_ns,
                 'target_system_id': sys_id,
-                'node_namespace': node_namespace,
-            }.items(),
-        ))
-        actions.append(IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(planner_launch),
-            launch_arguments={
-                'px4_ns': px4_ns,
                 'self_index': self_index,
                 'node_namespace': node_namespace,
             }.items(),

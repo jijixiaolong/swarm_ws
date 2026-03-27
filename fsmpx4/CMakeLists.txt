@@ -20,6 +20,7 @@ find_package(px4_msgs REQUIRED)
 find_package(eigen3_cmake_module REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(swarm_planner REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FSMDebug.msg"
@@ -30,25 +31,29 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 add_library(fsmpx4_input STATIC src/input.cpp)
 set_target_properties(fsmpx4_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(fsmpx4_input PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-ament_target_dependencies(fsmpx4_input rclcpp geometry_msgs sensor_msgs nav_msgs std_msgs px4_msgs Eigen3)
+target_include_directories(fsmpx4_input PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${swarm_planner_INCLUDE_DIRS})
+ament_target_dependencies(fsmpx4_input rclcpp geometry_msgs sensor_msgs nav_msgs std_msgs px4_msgs Eigen3 swarm_planner)
 
 add_library(fsmpx4_control STATIC src/control.cpp)
 set_target_properties(fsmpx4_control PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(fsmpx4_control PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-ament_target_dependencies(fsmpx4_control rclcpp geometry_msgs sensor_msgs nav_msgs std_msgs px4_msgs Eigen3)
+target_include_directories(fsmpx4_control PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${swarm_planner_INCLUDE_DIRS})
+ament_target_dependencies(fsmpx4_control rclcpp geometry_msgs sensor_msgs nav_msgs std_msgs px4_msgs Eigen3 swarm_planner)
 
 add_library(fsmpx4_param_loader STATIC src/param_loader.cpp)
 set_target_properties(fsmpx4_param_loader PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(fsmpx4_param_loader PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-ament_target_dependencies(fsmpx4_param_loader rclcpp Eigen3)
+target_include_directories(fsmpx4_param_loader PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${swarm_planner_INCLUDE_DIRS})
+ament_target_dependencies(fsmpx4_param_loader rclcpp Eigen3 swarm_planner)
 
 # ── FSM Component (shared library) ──
 
 add_library(fsmpx4_fsm SHARED src/fsmpx4.cpp)
-target_include_directories(fsmpx4_fsm PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(fsmpx4_fsm fsmpx4_input fsmpx4_control fsmpx4_param_loader)
-ament_target_dependencies(fsmpx4_fsm rclcpp rclcpp_components geometry_msgs px4_msgs Eigen3)
+target_include_directories(fsmpx4_fsm PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${swarm_planner_INCLUDE_DIRS})
+target_link_libraries(fsmpx4_fsm
+  fsmpx4_input
+  fsmpx4_control
+  fsmpx4_param_loader
+  ${swarm_planner_LIBRARIES})
+ament_target_dependencies(fsmpx4_fsm rclcpp rclcpp_components geometry_msgs sensor_msgs px4_msgs Eigen3 swarm_planner)
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(fsmpx4_fsm "${cpp_typesupport_target}")
 rclcpp_components_register_nodes(fsmpx4_fsm "fsmpx4::FSMPX4")
@@ -79,6 +84,7 @@ install(PROGRAMS
   script/auto_arm.py
   script/rc.py
   script/analyze_swarm_bag
+  script/swarm_enu_rviz.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -89,7 +95,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_fsmpx4_planner_cmd test/test_fsmpx4_planner_cmd.cpp)
   if(TARGET test_fsmpx4_planner_cmd)
     target_link_libraries(test_fsmpx4_planner_cmd fsmpx4_fsm)
-    ament_target_dependencies(test_fsmpx4_planner_cmd rclcpp geometry_msgs px4_msgs)
+    ament_target_dependencies(test_fsmpx4_planner_cmd rclcpp geometry_msgs sensor_msgs px4_msgs swarm_planner)
   endif()
 
   find_package(ament_lint_auto REQUIRED)
@@ -99,6 +105,6 @@ endif()
 ament_export_include_directories(include)
 ament_export_libraries(fsmpx4_fsm)
 ament_export_dependencies(
-  rclcpp rclcpp_components geometry_msgs sensor_msgs nav_msgs std_msgs px4_msgs Eigen3 rosidl_default_runtime)
+  rclcpp rclcpp_components geometry_msgs sensor_msgs nav_msgs std_msgs px4_msgs Eigen3 rosidl_default_runtime swarm_planner)
 
 ament_package()

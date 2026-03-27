@@ -9,9 +9,9 @@
 #include <px4_msgs/msg/vehicle_global_position.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 
+#include "swarm_planner/geo_utils.h"
+#include "swarm_planner/planner_types.h"
 #include "types.h"
-#include "timed_data.h"
-#include "geo_utils.h"
 
 namespace fsmpx4 {
 namespace input {
@@ -54,7 +54,7 @@ public:
 
 private:
     types::UAVState& state_;
-    TimedData<int> stamp_;        // value unused, only stamp matters
+    swarm_planner::TimedData<int> stamp_;  // value unused, only stamp matters
     double last_mode_{0.0};
     double last_gear_{0.0};
     bool initialized_{false};
@@ -79,7 +79,7 @@ public:
 
 private:
     types::UAVState& state_;
-    TimedData<int> stamp_;
+    swarm_planner::TimedData<int> stamp_;
 };
 
 //=============================================================================
@@ -93,7 +93,11 @@ public:
     void feedGlobalPosition(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
     void feedLocalPosition(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
 
-    void setGpsOrigin(double lat_deg, double lon_deg, double alt_m) { origin_.set(lat_deg, lon_deg, alt_m); }
+    void setGpsOrigin(double lat_deg, double lon_deg, double alt_m)
+    {
+        origin_.set(lat_deg, lon_deg, alt_m);
+        gps_origin_set_ = true;
+    }
 
     bool positionFresh(const rclcpp::Time& now, double timeout_s = 0.5) const
     {
@@ -103,10 +107,11 @@ public:
 
 private:
     types::UAVState& state_;
-    geo::GpsOrigin origin_;
-    TimedData<int> horizontal_position_;
-    TimedData<int> vertical_position_;
-    TimedData<types::Vector3> velocity_;
+    swarm_planner::geo::GpsOrigin origin_;
+    bool gps_origin_set_{false};
+    swarm_planner::TimedData<int> horizontal_position_;
+    swarm_planner::TimedData<int> vertical_position_;
+    swarm_planner::TimedData<types::Vector3> velocity_;
 };
 
 }  // namespace input

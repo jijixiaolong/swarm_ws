@@ -89,6 +89,8 @@ types::ControlOutput PositionAttitudeController::computeFromDesiredAcceleration(
         return output;
     }
 
+    last_timestamp_ = std::isfinite(state.timestamp) ? state.timestamp : 0.0;
+
     const types::Vector3 A = -cfg_.mass * cfg_.gravity * types::Vector3::UnitZ() +
                              cfg_.mass * desired_acceleration;
     return computeFromA(state, A, yaw_desired, b1d);

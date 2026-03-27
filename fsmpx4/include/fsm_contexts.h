@@ -52,7 +52,11 @@ struct LandCtx
 
 /// Per-state context: CMD_CTRL
 struct CmdCtx
-{};
+{
+    void reset()
+    {
+    }
+};
 
 }  // namespace fsmpx4
 

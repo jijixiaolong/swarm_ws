@@ -16,12 +16,15 @@ def generate_launch_description():
     px4_ns = LaunchConfiguration('px4_ns')
     target_system_id = LaunchConfiguration('target_system_id')
     node_namespace = LaunchConfiguration('node_namespace')
+    self_index = LaunchConfiguration('self_index')
 
     return LaunchDescription([
         DeclareLaunchArgument('px4_ns', default_value='',
                               description='PX4 namespace, e.g. /px4_1'),
         DeclareLaunchArgument('target_system_id', default_value='1',
                               description='MAVLink target system ID'),
+        DeclareLaunchArgument('self_index', default_value='0',
+                              description='Swarm index of this UAV, e.g. 0/1/2'),
         DeclareLaunchArgument(
             'node_namespace',
             default_value='',
@@ -36,6 +39,7 @@ def generate_launch_description():
             parameters=[config_file, {
                 'px4_ns': px4_ns,
                 'vehicle_command.target_system_id': target_system_id,
+                'swarm.self_index': self_index,
             }],
         ),
     ])

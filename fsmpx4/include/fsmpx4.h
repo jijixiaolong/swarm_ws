@@ -1,7 +1,8 @@
 #ifndef FSMPX4_H_
 #define FSMPX4_H_
 
-#include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <array>
+
 #include <rclcpp/rclcpp.hpp>
 
 #include <px4_msgs/msg/manual_control_setpoint.hpp>
@@ -22,7 +23,9 @@
 #include "fsm_contexts.h"
 #include "input.h"
 #include "param_loader.h"
-#include "timed_data.h"
+#include "swarm_planner/msg/swarm_planner_debug.hpp"
+#include "swarm_planner/planner_core.h"
+#include "swarm_state.h"
 #include "types.h"
 
 namespace fsmpx4
@@ -61,15 +64,22 @@ private:
     bool rcReady(const rclcpp::Time& now);
     bool imuReady(const rclcpp::Time& now);
     bool positionReady(const rclcpp::Time& now);
+    bool buildSwarmInput(
+        const rclcpp::Time& now,
+        swarm_planner::control::SwarmPlannerCore::Input& input,
+        std::string* reason = nullptr) const;
     bool landDetectedReady(const rclcpp::Time& now) const;
     void fallbackToManual(const char* reason);
 
     // ── PX4 communication ──
     void publishOffboardMode(bool use_attitude);
-    void publishAttitudeCommand(const types::Matrix3& attitude, double thrust, const rclcpp::Time& stamp);
+    void publishAttitudeCommand(const types::Quaternion& attitude, double thrust, const rclcpp::Time& stamp);
     void publishVehicleCommand(uint16_t command, float param1 = 0.0f, float param2 = 0.0f);
     bool toggleOffboardMode(bool on_off);
     void publishDebugMessage(const rclcpp::Time& stamp);
+    void publishSwarmDebugMessage(
+        const rclcpp::Time& stamp,
+        const swarm_planner::control::SwarmPlannerCore::DebugState& debug);
 
     // ── Utility ──
     void logLoadedParams() const;
@@ -91,14 +101,13 @@ private:
     rclcpp::Time land_detected_stamp_{0, 0, RCL_ROS_TIME};
     bool land_request_pending_{false};
 
-    // ── External planner acceleration ──
-    TimedData<geometry_msgs::msg::Vector3Stamped> planner_acceleration_;
-
     // ── Controller & state ──
     control::PositionAttitudeController controller_;
     std::shared_ptr<types::UAVState> current_state_;
     types::ControlOutput output_;
     types::UAVCommand cmd_;
+    SwarmState swarm_state_{};
+    swarm_planner::control::SwarmPlannerCore swarm_core_{};
 
     // ── Input modules (reference-injected with *current_state_) ──
     input::RC_Receiver rc_input_{*current_state_};
@@ -110,6 +119,7 @@ private:
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_mode_pub_;
     rclcpp::Publisher<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr attitude_pub_;
     rclcpp::Publisher<fsmpx4::msg::FSMDebug>::SharedPtr debug_pub_;
+    rclcpp::Publisher<swarm_planner::msg::SwarmPlannerDebug>::SharedPtr swarm_debug_pub_;
 
     // ── Subscribers ──
     rclcpp::Subscription<px4_msgs::msg::ManualControlSetpoint>::SharedPtr rc_sub_;
@@ -119,7 +129,12 @@ private:
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_pos_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr land_detected_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr land_trigger_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr planner_acceleration_sub_;
+    std::array<rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr,
+               swarm_planner::kNumUavs - 1> uav_global_subs_{};
+    std::array<rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr,
+               swarm_planner::kNumUavs - 1> uav_local_subs_{};
+    rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr load_global_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr load_local_sub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
 
     // ── Offboard toggle helper ──

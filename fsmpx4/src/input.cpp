@@ -142,12 +142,13 @@ Position_Reader::Position_Reader(types::UAVState& state)
 
 void Position_Reader::feedGlobalPosition(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg)
 {
-    if (!msg->lat_lon_valid || !origin_.initialized)
+    if (!msg->lat_lon_valid || !gps_origin_set_)
         return;
 
     const auto now = rclcpp::Clock(RCL_ROS_TIME).now();
     // x/y 直接由当前经纬度相对固定 GPS 原点换算得到，因此所有飞机天然落在同一个公共 NED 原点下。
-    const auto ned_xy = geo::lla_to_ned(msg->lat, msg->lon, origin_.alt_m, origin_);
+    const auto ned_xy =
+        swarm_planner::geo::lla_to_ned(msg->lat, msg->lon, origin_.alt_m, origin_);
     state_.position.x() = ned_xy.x();
     state_.position.y() = ned_xy.y();
     state_.timestamp = now.seconds();

@@ -35,24 +35,6 @@ struct TimedData
     }
 };
 
-struct SwarmPeerKinematics
-{
-    Vector3 position{Vector3::Zero()};
-    Vector3 velocity{Vector3::Zero()};
-};
-
-struct SwarmPayloadState
-{
-    Vector3 position{Vector3::Zero()};
-    Vector3 velocity{Vector3::Zero()};
-};
-
-struct SwarmCmdSnapshot
-{
-    std::array<SwarmPeerKinematics, kNumUavs> peers{};
-    SwarmPayloadState payload{};
-};
-
 }  // namespace swarm_planner
 
 #endif  // SWARM_PLANNER_PLANNER_TYPES_H_

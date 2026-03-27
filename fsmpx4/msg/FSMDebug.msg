@@ -1,5 +1,15 @@
 std_msgs/Header header
 
+uint8 STATE_MANUAL_CTRL=0
+uint8 STATE_OFFBOARD_STABILIZED=1
+uint8 STATE_AUTO_TAKEOFF=2
+uint8 STATE_AUTO_HOVER=3
+uint8 STATE_AUTO_LAND=4
+uint8 STATE_CMD_CTRL=5
+
+uint8 fsm_state
+string fsm_state_name
+
 geometry_msgs/Vector3 uav_position
 geometry_msgs/Vector3 uav_velocity
 geometry_msgs/Vector3 uav_angular_velocity
