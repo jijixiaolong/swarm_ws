@@ -82,6 +82,66 @@ def ordered_fieldnames(row: Mapping[str, Any]) -> list[str]:
     return preferred + others
 
 
+def _discover_topic_fieldnames(
+    bag_path: Path,
+    storage_id: str,
+    topic_classes: Mapping[str, Any],
+    topic_types: Mapping[str, str],
+    t_start: float | None,
+    t_end: float | None,
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Second pass before export: gather the full key set for each topic.
+
+    Some topics, especially MarkerArray, do not keep a fixed flattened schema
+    across messages. DictWriter requires a stable header, so we must union all
+    observed keys in the selected export window first.
+    """
+
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=str(bag_path), storage_id=storage_id),
+        rosbag2_py.ConverterOptions(
+            input_serialization_format="cdr",
+            output_serialization_format="cdr",
+        ),
+    )
+
+    field_sets: dict[str, set[str]] = defaultdict(set)
+    skipped_topics: dict[str, str] = {}
+    discovery_deserialize_failures: dict[str, int] = defaultdict(int)
+
+    while reader.has_next():
+        topic, serialized, bag_time_ns = reader.read_next()
+
+        bag_time_s = float(bag_time_ns) * 1e-9
+        if t_start is not None and t_end is not None:
+            if bag_time_s < t_start or bag_time_s > t_end:
+                continue
+
+        try:
+            msg = deserialize_message(serialized, topic_classes[topic])
+        except Exception as exc:  # pragma: no cover - depends on bag contents
+            discovery_deserialize_failures[topic] += 1
+            print(
+                f"Warning: deserialize failed for {topic} during field discovery "
+                f"(count={discovery_deserialize_failures[topic]}): {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        row: dict[str, Any] = {}
+        flatten_value(message_to_ordereddict(msg), "", row)
+        row["_bag_time_ns"] = int(bag_time_ns)
+        row["_bag_time_s"] = bag_time_s
+        field_sets[topic].update(row.keys())
+
+    fieldnames = {
+        topic: ordered_fieldnames({key: None for key in keys})
+        for topic, keys in field_sets.items()
+    }
+    return fieldnames, skipped_topics
+
+
 def clear_generated_outputs(csv_dir: Path, summary_path: Path) -> None:
     for path in csv_dir.glob("*.csv"):
         path.unlink()
@@ -167,12 +227,15 @@ def main() -> int:
     topic_info = reader.get_all_topics_and_types()
     topic_types = {topic.name: topic.type for topic in topic_info}
     topic_classes = {name: get_message(topic_type) for name, topic_type in topic_types.items()}
+    topic_fieldnames, skipped_topics = _discover_topic_fieldnames(
+        bag_path, args.storage_id, topic_classes, topic_types, t_start, t_end
+    )
     topic_counts: dict[str, int] = defaultdict(int)
     csv_paths: dict[str, Path] = {}
     csv_files: dict[str, Any] = {}
     csv_writers: dict[str, csv.DictWriter] = {}
-    skipped_topics: dict[str, str] = {}
 
+    export_deserialize_failures: dict[str, int] = defaultdict(int)
     try:
         while reader.has_next():
             topic, serialized, bag_time_ns = reader.read_next()
@@ -182,22 +245,12 @@ def main() -> int:
             try:
                 msg = deserialize_message(serialized, topic_classes[topic])
             except Exception as exc:  # pragma: no cover - depends on bag contents
-                skipped_topics[topic] = (
-                    f"deserialization_failed type={topic_types[topic]} error={type(exc).__name__}"
-                )
+                export_deserialize_failures[topic] += 1
                 print(
-                    f"Warning: skipping topic {topic} after deserialization failure: {exc}",
+                    f"Warning: deserialize failed for {topic} during export "
+                    f"(count={export_deserialize_failures[topic]}): {exc}",
                     file=sys.stderr,
                 )
-                if topic in csv_files:
-                    csv_files[topic].close()
-                    csv_files.pop(topic, None)
-                if topic in csv_writers:
-                    csv_writers.pop(topic, None)
-                if topic in csv_paths and csv_paths[topic].exists():
-                    csv_paths[topic].unlink()
-                    csv_paths.pop(topic, None)
-                topic_counts.pop(topic, None)
                 continue
 
             row = {}
@@ -210,11 +263,18 @@ def main() -> int:
                 if bag_time_s < t_start or bag_time_s > t_end:
                     continue
 
+            if topic not in topic_fieldnames:
+                topic_fieldnames[topic] = ordered_fieldnames(row)
+
             if topic not in csv_writers:
                 csv_path = csv_dir / f"{sanitize_name(topic)}.csv"
                 csv_paths[topic] = csv_path
                 csv_file = csv_path.open("w", newline="", encoding="utf-8")
-                writer = csv.DictWriter(csv_file, fieldnames=ordered_fieldnames(row))
+                writer = csv.DictWriter(
+                    csv_file,
+                    fieldnames=topic_fieldnames[topic],
+                    extrasaction="ignore",
+                )
                 writer.writeheader()
                 csv_files[topic] = csv_file
                 csv_writers[topic] = writer

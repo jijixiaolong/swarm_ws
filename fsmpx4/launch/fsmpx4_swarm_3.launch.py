@@ -25,11 +25,17 @@ def _bag_topics():
         '/px4_4/fmu/out/vehicle_global_position',
         '/px4_4/fmu/out/vehicle_local_position',
         '/swarm/land_trigger',
+        '/swarm/cmd_target_ned',
+        '/swarm/rviz/cmd_target_pose',
+        '/swarm/rviz/markers',
+        '/visualization_marker_array',
+        '/swarm/rviz/payload/pose',
         '/rc/manual_control_setpoint',
     ]
     for px4_ns, _sys_id, _self_index in UAV_CONFIGS:
         ns = px4_ns.lstrip('/')
         topics.extend([
+            f'/swarm/rviz/{ns}/pose',
             f'/{ns}/rc/manual_control_setpoint',
             f'/{ns}/fsmpx4_fsm/debug',
             f'/{ns}/swarm_planner/debug',

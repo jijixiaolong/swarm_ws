@@ -63,6 +63,11 @@ class SwarmEnuRvizNode(Node):
                 ).value
             )
         )
+        self._target_ned = (
+            float(self.declare_parameter("swarm.target_x_m", 1.0).value),
+            float(self.declare_parameter("swarm.target_y_m", 1.0).value),
+            float(self.declare_parameter("swarm.target_z_m", -1.5).value),
+        )
 
         self._fixed_frame = str(self.declare_parameter("rviz.fixed_frame", "map").value)
         self._fixed_frame_parent = str(
@@ -95,6 +100,9 @@ class SwarmEnuRvizNode(Node):
         )
         self._payload_marker_scale_m = max(
             0.05, float(self.declare_parameter("rviz.payload_marker_scale_m", 0.28).value)
+        )
+        self._target_marker_scale_m = max(
+            0.05, float(self.declare_parameter("rviz.target_marker_scale_m", 0.24).value)
         )
         self._text_height_m = max(
             0.05, float(self.declare_parameter("rviz.text_height_m", 0.22).value)
@@ -130,6 +138,12 @@ class SwarmEnuRvizNode(Node):
         self._entities: Dict[str, EntityState] = {}
         self._entity_order: List[str] = []
         self._subscriptions = []
+        self._target_ned_pub = self.create_publisher(
+            PoseStamped, "/swarm/cmd_target_ned", marker_qos
+        )
+        self._target_pose_pub = self.create_publisher(
+            PoseStamped, f"{self._pose_topic_prefix}/cmd_target_pose", marker_qos
+        )
 
         uav_colors = (
             (0.95, 0.25, 0.25),
@@ -213,11 +227,14 @@ class SwarmEnuRvizNode(Node):
 
         for marker in self._build_entity_markers(stamp, now):
             marker_array.markers.append(marker)
+        for marker in self._build_target_markers(stamp):
+            marker_array.markers.append(marker)
 
         rope_marker = self._build_rope_marker(stamp, now)
         if rope_marker is not None:
             marker_array.markers.append(rope_marker)
 
+        self._publish_target_pose(stamp)
         for publisher in self._marker_pubs:
             publisher.publish(marker_array)
 
@@ -234,6 +251,13 @@ class SwarmEnuRvizNode(Node):
             markers.append(self._make_body_marker(index, entity, stamp))
             markers.append(self._make_text_marker(index, entity, stamp))
         return markers
+
+    def _build_target_markers(self, stamp) -> List[Marker]:
+        target_position_enu = self._target_pose_enu()
+        return [
+            self._make_target_body_marker(stamp, target_position_enu),
+            self._make_target_text_marker(stamp, target_position_enu),
+        ]
 
     def _build_rope_marker(self, stamp, now: rclpy.time.Time) -> Optional[Marker]:
         payload = self._entities.get("payload")
@@ -280,6 +304,23 @@ class SwarmEnuRvizNode(Node):
         pose.pose.orientation.w = 1.0
         entity.pose_pub.publish(pose)
 
+    def _publish_target_pose(self, stamp) -> None:
+        target_ned = PoseStamped()
+        target_ned.header.frame_id = "ned"
+        target_ned.header.stamp = stamp
+        target_ned.pose.position.x = float(self._target_ned[0])
+        target_ned.pose.position.y = float(self._target_ned[1])
+        target_ned.pose.position.z = float(self._target_ned[2])
+        target_ned.pose.orientation.w = 1.0
+        self._target_ned_pub.publish(target_ned)
+
+        target_pose = PoseStamped()
+        target_pose.header.frame_id = self._fixed_frame
+        target_pose.header.stamp = stamp
+        target_pose.pose.position = self._to_point(self._target_pose_enu())
+        target_pose.pose.orientation.w = 1.0
+        self._target_pose_pub.publish(target_pose)
+
     def _make_body_marker(self, index: int, entity: EntityState, stamp) -> Marker:
         marker = Marker()
         marker.header.frame_id = self._fixed_frame
@@ -320,11 +361,59 @@ class SwarmEnuRvizNode(Node):
         marker.lifetime = self._marker_lifetime
         return marker
 
+    def _make_target_body_marker(
+        self, stamp, position_enu: Tuple[float, float, float]
+    ) -> Marker:
+        marker = Marker()
+        marker.header.frame_id = self._fixed_frame
+        marker.header.stamp = stamp
+        marker.ns = "swarm_target"
+        marker.id = 2000
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position = self._to_point(position_enu)
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = self._target_marker_scale_m
+        marker.scale.y = self._target_marker_scale_m
+        marker.scale.z = self._target_marker_scale_m
+        marker.color.r = 0.95
+        marker.color.g = 0.95
+        marker.color.b = 0.10
+        marker.color.a = 0.90
+        marker.lifetime = self._marker_lifetime
+        return marker
+
+    def _make_target_text_marker(
+        self, stamp, position_enu: Tuple[float, float, float]
+    ) -> Marker:
+        marker = Marker()
+        marker.header.frame_id = self._fixed_frame
+        marker.header.stamp = stamp
+        marker.ns = "swarm_target_text"
+        marker.id = 2100
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose.position = self._to_point(position_enu)
+        marker.pose.position.z += self._target_marker_scale_m * 0.75 + 0.15
+        marker.pose.orientation.w = 1.0
+        marker.scale.z = self._text_height_m
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 0.2
+        marker.color.a = 0.95
+        marker.text = "Target"
+        marker.lifetime = self._marker_lifetime
+        return marker
+
     def _is_fresh(self, entity: EntityState, now: rclpy.time.Time) -> bool:
         if entity.position_enu is None or entity.last_update_ns <= 0:
             return False
         age_s = (now.nanoseconds - entity.last_update_ns) / 1e9
         return age_s <= self._freshness_timeout_s
+
+    def _target_pose_enu(self) -> Tuple[float, float, float]:
+        north, east, down = self._target_ned
+        return east, north, -down
 
     def _lla_to_enu(self, lat_deg: float, lon_deg: float, alt_m: float) -> Tuple[float, float, float]:
         north = (lat_deg - self._origin_lat_deg) * DEG_TO_RAD * EARTH_RADIUS_M

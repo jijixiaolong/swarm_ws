@@ -86,11 +86,13 @@
     "swarm.acc_norm_limit_m_s2": 6.0
     "swarm.integral_limit": 2.0
     "swarm.payload_integral_limit": 1.0
-    "swarm.payload_error_limit_xy_m": 0.6
+    "swarm.payload_error_limit_xy_m": 0.0  # 关闭 XY 误差截断，让大偏差能被外环完整看到
     "swarm.payload_error_limit_z_m": 0.5
+    # 结合当前仿真 rope_length=1.15m、h_u=1.0m，改成更开的近似等边布局，
+    # 提高 UAV 间横向间距，减少偶发碰撞。
     "swarm.structure_reference.rest_lengths":
-      [0.00, 0.81, 0.81, 0.49, 1.11,
-       0.81, 0.00, 0.86, 0.51, 1.12,
-       0.81, 0.86, 0.00, 0.44, 1.09,
-       0.49, 0.51, 0.44, 0.00, 1.00,
-       1.11, 1.12, 1.09, 1.00, 0.00]
+      [0.00, 0.94, 0.94, 0.54, 1.14,
+       0.94, 0.00, 0.94, 0.54, 1.14,
+       0.94, 0.94, 0.00, 0.54, 1.14,
+       0.54, 0.54, 0.54, 0.00, 1.00,
+       1.14, 1.14, 1.14, 1.00, 0.00]
