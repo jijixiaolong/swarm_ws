@@ -74,7 +74,7 @@
     "swarm.rope_taut_fraction": 0.87 # 1.0m / 1.15m ≈ 0.87，达到此距离视为绷紧
     "swarm.gravity": 9.81
     "swarm.h_u_m": 1.0
-    "swarm.spring_k": 2.6
+    "swarm.spring_k": 1.8               # [FIX-P3] t>12s spring主导错方向 0.15~0.23m/s²
     "swarm.damping_c1": 2.6
     "swarm.friction_c2": 0.5           # [FIX-P4] 增大绝对速度摩擦，加强全局耗散
     "swarm.vel_pid_kp": 1.2
