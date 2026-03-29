@@ -76,18 +76,24 @@
     "swarm.h_u_m": 1.0
     "swarm.spring_k": 2.6
     "swarm.damping_c1": 2.6
-    "swarm.friction_c2": 0.3
+    "swarm.friction_c2": 0.5           # [FIX-P4] 增大绝对速度摩擦，加强全局耗散
     "swarm.vel_pid_kp": 1.2
     "swarm.vel_pid_ki": 0.0          # 先关掉内环积分，避免与 payload 外环积分叠加形成慢振荡
     "swarm.vel_pid_kd": 0.2
     "swarm.payload_kp": 1.2
-    "swarm.payload_ki": 0.18
+    "swarm.payload_ki": 0.0           # [FIX-P1] 关掉 ki：t=3s 即达上限，ki/kp 比 2.7 倍，全程产生 ±0.18m/s 相位滞后偏置
     "swarm.payload_mass": 0.0          # 先关闭 payload 重力前馈；当前日志中该项会带来明显上推偏置
     "swarm.acc_norm_limit_m_s2": 6.0
     "swarm.integral_limit": 2.0
     "swarm.payload_integral_limit": 1.0
-    "swarm.payload_error_limit_xy_m": 0.0  # 关闭 XY 误差截断，让大偏差能被外环完整看到
-    "swarm.payload_error_limit_z_m": 0.5
+    "swarm.payload_error_limit_xy_m": 0.5  # [FIX-P1] 恢复：初始冲击限 v_desired ≤ 0.6m/s（之前 0.0 = 全开，导致 1.93m/s 冲击）
+    "swarm.payload_error_limit_z_m":  0.5
+
+    # 编队收敛门控参数（配合 CMD_CTRL 两阶段逻辑，代码待实现）
+    "swarm.formation_gate.enabled":         true
+    "swarm.formation_gate.beta_min":        0.90  # 所有绳子绷紧到设计高度 90%
+    "swarm.formation_gate.struct_err_max":  0.20  # UAV-anchor 距离误差 ≤ 20%
+    "swarm.formation_gate.hold_duration_s": 1.0   # 连续满足后再等 1s 才切换
     # 结合当前仿真 rope_length=1.15m、h_u=1.0m，改成更开的近似等边布局，
     # 提高 UAV 间横向间距，减少偶发碰撞。
     "swarm.structure_reference.rest_lengths":

@@ -571,6 +571,21 @@ void FSMPX4::executeState(const rclcpp::Time& now)
             enterState(State::AUTO_HOVER);
             return;
         }
+
+        // ── 编队收敛门控 ────────────────────────────────────────────────────
+        // Phase 0 (FORM_HOLD): 用当前 payload 位置替换目标
+        //   → 外环位置误差 = 0 → payload_ki 不累积 → 弹簧网络自由收敛
+        // Phase 1 (PAYLOAD_TRACK): 使用真实任务目标（input 不变）
+        if (cmd_ctx_.phase == CmdPhase::FORM_HOLD)
+        {
+            input.payload_target_ned = swarm_state_.load.value.pos;
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "[CMD_CTRL] FORM_HOLD: waiting for formation convergence "
+                "(beta[0]=%.3f beta[1]=%.3f beta[2]=%.3f)",
+                0.0, 0.0, 0.0);  // filled in after compute
+        }
+
         if (!swarm_core_.compute(input, swarm_output) || !swarm_output.valid)
         {
             RCLCPP_WARN_THROTTLE(
@@ -580,6 +595,17 @@ void FSMPX4::executeState(const rclcpp::Time& now)
                 "CMD_CTRL swarm planner compute failed, fallback to AUTO_HOVER");
             enterState(State::AUTO_HOVER);
             return;
+        }
+
+        // ── 检查是否升级到 PAYLOAD_TRACK ──────────────────────────────────
+        if (cmd_ctx_.phase == CmdPhase::FORM_HOLD &&
+            checkFormationQuality(swarm_output.debug, now))
+        {
+            swarm_core_.reset();  // 清积分（payload_position_integral_ 归零）
+            cmd_ctx_.phase = CmdPhase::PAYLOAD_TRACK;
+            RCLCPP_INFO(
+                get_logger(),
+                "\033[32m[CMD_CTRL] Formation converged → PAYLOAD_TRACK\033[0m");
         }
 
         cmd_.acceleration = types::Vector3(
@@ -634,6 +660,64 @@ void FSMPX4::enterState(State next_state)
         default: break;
     }
     state_ = next_state;
+}
+
+//==============================================================================
+// checkFormationQuality
+//==============================================================================
+
+bool FSMPX4::checkFormationQuality(
+    const swarm_planner::control::SwarmPlannerCore::DebugState& dbg,
+    const rclcpp::Time& now)
+{
+    using Core = swarm_planner::control::SwarmPlannerCore;
+    const auto& gate = params_.swarm.formation_gate;
+
+    if (!gate.enabled)
+    {
+        return true;  // 门控关闭时直接放行
+    }
+
+    // ── 指标1：所有 beta[i] ≥ beta_min（绳子绷紧到设计高度 beta_min × h_u）──
+    for (int i = 0; i < Core::kNumUavs; ++i)
+    {
+        if (dbg.beta[i] < gate.beta_min)
+        {
+            cmd_ctx_.phase_ok_since = -1.0;  // 重置计时
+            return false;
+        }
+    }
+
+    // ── 指标2：UAV–anchor 距离误差 ≤ struct_err_max ──────────────────────────
+    // anchor 节点索引 = kNumUavs = 3（q3），payload 节点索引 = kNumUavs+1 = 4
+    constexpr int kAnchorIdx = Core::kNumUavs;  // = 3
+    for (int i = 0; i < Core::kNumUavs; ++i)
+    {
+        const double rest = dbg.rest_lengths[
+            static_cast<std::size_t>(i) * Core::kNumNodes + kAnchorIdx];
+        if (rest <= 0.0) { continue; }
+        const double dist =
+            (dbg.virtual_positions_ned[i] - dbg.virtual_positions_ned[kAnchorIdx]).norm();
+        const double rel_err = std::abs(dist - rest) / rest;
+        if (rel_err > gate.struct_err_max)
+        {
+            cmd_ctx_.phase_ok_since = -1.0;
+            return false;
+        }
+    }
+
+    // ── 两项均满足：开始计时 ─────────────────────────────────────────────────
+    const double now_s = now.seconds();
+    if (cmd_ctx_.phase_ok_since < 0.0)
+    {
+        cmd_ctx_.phase_ok_since = now_s;
+        RCLCPP_INFO(
+            get_logger(),
+            "[CMD_CTRL] Formation quality OK, holding for %.1f s before PAYLOAD_TRACK",
+            gate.hold_duration_s);
+    }
+
+    return (now_s - cmd_ctx_.phase_ok_since) >= gate.hold_duration_s;
 }
 
 //==============================================================================

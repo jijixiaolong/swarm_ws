@@ -70,6 +70,10 @@ private:
         std::string* reason = nullptr) const;
     bool landDetectedReady(const rclcpp::Time& now) const;
     void fallbackToManual(const char* reason);
+    /// 检查编队质量是否满足切换到 PAYLOAD_TRACK 的条件
+    bool checkFormationQuality(
+        const swarm_planner::control::SwarmPlannerCore::DebugState& dbg,
+        const rclcpp::Time& now);
 
     // ── PX4 communication ──
     void publishOffboardMode(bool use_attitude);

@@ -50,11 +50,20 @@ struct LandCtx
     }
 };
 
+/// CMD_CTRL 内部子阶段
+enum class CmdPhase {
+    FORM_HOLD,      ///< 编队稳定期：payload_target = 当前位置，ki 不累积
+    PAYLOAD_TRACK,  ///< 载荷跟踪期：payload_target = 真实任务目标
+};
+
 /// Per-state context: CMD_CTRL
-struct CmdCtx
-{
-    void reset()
-    {
+struct CmdCtx {
+    CmdPhase phase{CmdPhase::FORM_HOLD};
+    double   phase_ok_since{-1.0};  ///< 编队质量首次达标的时间戳（秒），-1 表示未达标
+
+    void reset() {
+        phase = CmdPhase::FORM_HOLD;
+        phase_ok_since = -1.0;
     }
 };
 

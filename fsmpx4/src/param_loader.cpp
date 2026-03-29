@@ -285,6 +285,22 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
         params.swarm.core.rest_lengths_override = node.declare_parameter<std::vector<double>>(
             "swarm.structure_reference.rest_lengths", params.swarm.core.rest_lengths_override);
 
+        // ── 编队收敛门控 ──────────────────────────────────────────────────────
+        params.swarm.formation_gate.enabled = node.declare_parameter<bool>(
+            "swarm.formation_gate.enabled", params.swarm.formation_gate.enabled);
+        params.swarm.formation_gate.beta_min = std::clamp(
+            node.declare_parameter<double>(
+                "swarm.formation_gate.beta_min", params.swarm.formation_gate.beta_min),
+            0.0, 1.5);
+        params.swarm.formation_gate.struct_err_max = clampMin(
+            node.declare_parameter<double>(
+                "swarm.formation_gate.struct_err_max", params.swarm.formation_gate.struct_err_max),
+            0.0);
+        params.swarm.formation_gate.hold_duration_s = clampMin(
+            node.declare_parameter<double>(
+                "swarm.formation_gate.hold_duration_s", params.swarm.formation_gate.hold_duration_s),
+            0.0);
+
         return true;
     } catch (const std::exception& e) {
         RCLCPP_ERROR(node.get_logger(), "参数加载失败: %s", e.what());
