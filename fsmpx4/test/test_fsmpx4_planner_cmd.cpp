@@ -112,7 +112,6 @@ px4_msgs::msg::VehicleLocalPosition makeLocalPosition(
 swarm_planner::control::SwarmPlannerCore::Config makeSwarmConfig()
 {
     swarm_planner::control::SwarmPlannerCore::Config cfg;
-    cfg.gravity = 9.81;
     cfg.h_u_m = 1.0;
     cfg.spring_k = 3.0;
     cfg.damping_c1 = 1.2;
@@ -250,7 +249,6 @@ protected:
                 "swarm.payload_local_position_topic",
                 "/px4_4/fmu/out/vehicle_local_position"),
             rclcpp::Parameter("swarm.data_timeout_s", 0.05),
-            rclcpp::Parameter("swarm.gravity", 9.81),
             rclcpp::Parameter("swarm.h_u_m", 1.0),
             rclcpp::Parameter("swarm.spring_k", 3.0),
             rclcpp::Parameter("swarm.damping_c1", 1.2),
@@ -260,7 +258,6 @@ protected:
             rclcpp::Parameter("swarm.vel_pid_kd", 0.1),
             rclcpp::Parameter("swarm.payload_kp", 1.5),
             rclcpp::Parameter("swarm.payload_ki", 0.2),
-            rclcpp::Parameter("swarm.payload_mass", 1.0),
             rclcpp::Parameter("swarm.acc_norm_limit_m_s2", 6.0),
             rclcpp::Parameter("swarm.integral_limit", 2.0),
             rclcpp::Parameter("swarm.payload_integral_limit", 2.0),

@@ -219,39 +219,3 @@ TEST(SwarmPlannerCoreTest, PayloadPositionIntegralBuildsDesiredAccelerationForSt
     ASSERT_TRUE(core.compute(input, output));
     EXPECT_NEAR(output.desired_acceleration.x(), 0.01, 1e-6);
 }
-
-TEST(SwarmPlannerCoreTest, PayloadGravityFeedforwardShiftsDesiredAccelerationUpward)
-{
-    using Core = swarm_planner::control::SwarmPlannerCore;
-    Core core_no_ff, core_ff;
-
-    auto cfg = makeConfig();
-    cfg.spring_k = 0.0;
-    cfg.damping_c1 = 0.0;
-    cfg.friction_c2 = 0.0;
-    cfg.vel_pid_kp = 2.0;
-    cfg.vel_pid_ki = 0.0;
-    cfg.vel_pid_kd = 0.0;
-    cfg.payload_kp = 1.2;
-    cfg.acc_norm_limit_m_s2 = 20.0;
-
-    auto cfg_ff = cfg;
-    cfg_ff.payload_mass = 1.5;
-
-    ASSERT_TRUE(core_no_ff.initialize(cfg));
-    ASSERT_TRUE(core_ff.initialize(cfg_ff));
-
-    auto input = makeInput();
-    Core::Output out_no_ff, out_ff;
-    ASSERT_TRUE(core_no_ff.compute(input, out_no_ff));
-    ASSERT_TRUE(core_ff.compute(input, out_ff));
-
-    // payload_mass > 0 时 z 分量应更小（NED 更负 = 更向上）
-    EXPECT_LT(out_ff.desired_acceleration.z(), out_no_ff.desired_acceleration.z());
-
-    // 前馈量 = -payload_mass * gravity / (kNumUavs * uav_mass)
-    const double expected_ff = -cfg_ff.payload_mass * cfg_ff.gravity
-                               / (Core::kNumUavs * input.mass);
-    const double actual_shift = out_ff.desired_acceleration.z() - out_no_ff.desired_acceleration.z();
-    EXPECT_NEAR(actual_shift, expected_ff, 1e-4);
-}

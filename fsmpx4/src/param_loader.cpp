@@ -241,8 +241,6 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
             node.declare_parameter<double>("swarm.rope_taut_fraction", params.swarm.rope_taut_fraction),
             0.5, 1.0);
 
-        params.swarm.core.gravity = clampMin(
-            node.declare_parameter<double>("swarm.gravity", params.swarm.core.gravity), 0.0);
         params.swarm.core.h_u_m = clampMin(
             node.declare_parameter<double>("swarm.h_u_m", params.swarm.core.h_u_m), 1e-6);
         params.swarm.core.spring_k = clampMin(
@@ -261,8 +259,6 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
             node.declare_parameter<double>("swarm.payload_kp", params.swarm.core.payload_kp), 0.0);
         params.swarm.core.payload_ki = clampMin(
             node.declare_parameter<double>("swarm.payload_ki", params.swarm.core.payload_ki), 0.0);
-        params.swarm.core.payload_mass = clampMin(
-            node.declare_parameter<double>("swarm.payload_mass", params.swarm.core.payload_mass), 0.0);
         params.swarm.core.acc_norm_limit_m_s2 = clampMin(
             node.declare_parameter<double>(
                 "swarm.acc_norm_limit_m_s2", params.swarm.core.acc_norm_limit_m_s2),

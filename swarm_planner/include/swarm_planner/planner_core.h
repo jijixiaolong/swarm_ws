@@ -20,7 +20,6 @@ public:
 
     struct Config
     {
-        double gravity{9.81};
         double h_u_m{1.0};
         double spring_k{1.2};
         double damping_c1{0.8};
@@ -30,7 +29,6 @@ public:
         double vel_pid_kd{0.2};
         double payload_kp{1.2};
         double payload_ki{0.0};
-        double payload_mass{0.0};
         double acc_norm_limit_m_s2{6.0};
         double integral_limit{2.0};
         double payload_integral_limit{2.0};

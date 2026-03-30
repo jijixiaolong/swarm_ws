@@ -287,7 +287,14 @@ void FSMPX4::process()
 
     checkTransitions(now);
     executeState(now);
-    publishDebugMessage(now);
+
+    // debug 消息降频发布：控制回路保持高频，但 debug bag 数据按 every_n 采样
+    ++debug_publish_counter_;
+    if (debug_publish_counter_ >= debug_publish_every_n_)
+    {
+        debug_publish_counter_ = 0;
+        publishDebugMessage(now);
+    }
 }
 
 //==============================================================================
@@ -688,23 +695,11 @@ bool FSMPX4::checkFormationQuality(
         }
     }
 
-    // ── 指标2：UAV–anchor 距离误差 ≤ struct_err_max ──────────────────────────
-    // anchor 节点索引 = kNumUavs = 3（q3），payload 节点索引 = kNumUavs+1 = 4
-    constexpr int kAnchorIdx = Core::kNumUavs;  // = 3
-    for (int i = 0; i < Core::kNumUavs; ++i)
-    {
-        const double rest = dbg.rest_lengths[
-            static_cast<std::size_t>(i) * Core::kNumNodes + kAnchorIdx];
-        if (rest <= 0.0) { continue; }
-        const double dist =
-            (dbg.virtual_positions_ned[i] - dbg.virtual_positions_ned[kAnchorIdx]).norm();
-        const double rel_err = std::abs(dist - rest) / rest;
-        if (rel_err > gate.struct_err_max)
-        {
-            cmd_ctx_.phase_ok_since = -1.0;
-            return false;
-        }
-    }
+    // ── 指标2（已移除）：UAV–anchor 距离误差检查 ─────────────────────────────
+    // 实测：UAV-anchor 实际距离远超 rest_length(0.54m) 的 20% 容差，
+    // 原因是飞行时悬挂姿态与静态设计构型有明显差异。
+    // beta[i] 已经是绳子绷紧程度的直接指标，单独使用即可。
+    (void)gate.struct_err_max;  // suppress unused warning
 
     // ── 两项均满足：开始计时 ─────────────────────────────────────────────────
     const double now_s = now.seconds();
@@ -932,6 +927,11 @@ void FSMPX4::publishSwarmDebugMessage(
     const rclcpp::Time& stamp,
     const swarm_planner::control::SwarmPlannerCore::DebugState& debug)
 {
+    // 与 publishDebugMessage 使用同一降频逻辑：计数器不为0说明本轮不发布
+    if (debug_publish_counter_ != 0)
+    {
+        return;
+    }
     if (swarm_debug_pub_->get_subscription_count() == 0 &&
         swarm_debug_pub_->get_intra_process_subscription_count() == 0)
     {

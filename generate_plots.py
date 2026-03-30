@@ -515,12 +515,13 @@ def plot_desired_acceleration():
     has_data = False
 
     for uid in UAV_IDS:
-        df = load(f"px4_{uid}_planner_desired_acceleration.csv")
+        df = load(f"px4_{uid}_swarm_planner_debug.csv")
         if df is None: continue
+        if not has_columns(df, "desired_acceleration.x", "desired_acceleration.y", "desired_acceleration.z"): continue
         has_data = True
-        axes[0].plot(df["t"], df["vector.x"], color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
-        axes[1].plot(df["t"], df["vector.y"], color=UAV_COLORS[uid], lw=1.2)
-        axes[2].plot(df["t"], df["vector.z"], color=UAV_COLORS[uid], lw=1.2)
+        axes[0].plot(df["t"], df["desired_acceleration.x"], color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
+        axes[1].plot(df["t"], df["desired_acceleration.y"], color=UAV_COLORS[uid], lw=1.2)
+        axes[2].plot(df["t"], df["desired_acceleration.z"], color=UAV_COLORS[uid], lw=1.2)
 
     for ax, lbl in zip(axes, ["ax (m/s²)", "ay (m/s²)", "az (m/s²)"]):
         ax.set_ylabel(lbl); ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.5)
@@ -1159,9 +1160,9 @@ def plot_paper_control_effort():
     have_thr = False
 
     for uid in UAV_IDS:
-        df_acc = load(f"px4_{uid}_planner_desired_acceleration.csv")
-        if df_acc is not None and has_columns(df_acc, "vector.x", "vector.y", "vector.z"):
-            mag = np.sqrt(df_acc["vector.x"]**2 + df_acc["vector.y"]**2 + df_acc["vector.z"]**2)
+        df_acc = load(f"px4_{uid}_swarm_planner_debug.csv")
+        if df_acc is not None and has_columns(df_acc, "desired_acceleration.x", "desired_acceleration.y", "desired_acceleration.z"):
+            mag = np.sqrt(df_acc["desired_acceleration.x"]**2 + df_acc["desired_acceleration.y"]**2 + df_acc["desired_acceleration.z"]**2)
             axes[0].plot(df_acc["t"], mag, color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
             have_acc = True
 

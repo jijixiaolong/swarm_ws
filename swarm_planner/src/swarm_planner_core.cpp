@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <vector>
 
 namespace swarm_planner {
 namespace control {
@@ -29,14 +28,6 @@ Vector3 computeVelocityErrorDerivative(
     }
 
     return (error - prev_error) / dt;
-}
-
-void clampIntegral(Vector3& integral, double limit)
-{
-    for (int axis = 0; axis < 3; ++axis)
-    {
-        integral(axis) = std::clamp(integral(axis), -limit, limit);
-    }
 }
 
 void flattenRestLengths(
@@ -208,10 +199,14 @@ Vector3 SwarmPlannerCore::computeDesiredPayloadVelocity(
         return -cfg_.payload_kp * position_error;
     }
 
+    // 只对 Z 轴（高度）积分，消除重力引起的高度静差；X/Y 保持纯比例，避免水平振荡。
     if (dt > 0.0)
     {
-        payload_position_integral_ += position_error * dt;
-        clampIntegral(payload_position_integral_, std::abs(cfg_.payload_integral_limit));
+        payload_position_integral_.z() += position_error.z() * dt;
+        payload_position_integral_.z() = std::clamp(
+            payload_position_integral_.z(),
+            -std::abs(cfg_.payload_integral_limit),
+             std::abs(cfg_.payload_integral_limit));
     }
 
     return -cfg_.payload_kp * position_error
@@ -256,7 +251,11 @@ Vector3 SwarmPlannerCore::computeTrackingInput(
     if (dt > 0.0)
     {
         velocity_integral_ += velocity_error * dt;
-        clampIntegral(velocity_integral_, std::abs(cfg_.integral_limit));
+        const double vlimit = std::abs(cfg_.integral_limit);
+        for (int i = 0; i < 3; ++i)
+        {
+            velocity_integral_(i) = std::clamp(velocity_integral_(i), -vlimit, vlimit);
+        }
         prev_velocity_error_ = velocity_error;
         prev_velocity_error_valid_ = true;
     }
@@ -293,12 +292,8 @@ bool SwarmPlannerCore::compute(const Input& input, Output& output)
     const Vector3 virtual_acceleration = -passive_force / mass + tracking_input / mass;
     const Vector3 mapped_acceleration = state.beta[self_index] * virtual_acceleration;
 
-    // Payload 重力前馈：每架 UAV 分摊 payload 重量，在 NED 下为负 Z（向上）
-    const Vector3 payload_gravity_ff(
-        0.0, 0.0, -cfg_.payload_mass * cfg_.gravity / (kNumUavs * mass));
-
     const Vector3 desired_acceleration =
-        clipNorm(mapped_acceleration + payload_gravity_ff, cfg_.acc_norm_limit_m_s2);
+        clipNorm(mapped_acceleration, cfg_.acc_norm_limit_m_s2);
 
     if (!finiteVector(desired_acceleration))
     {

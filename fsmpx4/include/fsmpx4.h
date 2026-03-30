@@ -147,6 +147,11 @@ private:
     bool offboard_has_last_command_{false};
     rclcpp::Time offboard_toggle_start_time_{};
     rclcpp::Duration offboard_toggle_duration_{rclcpp::Duration::from_seconds(0.5)};
+
+    // ── Debug publish throttling ──
+    // 控制回路运行在高频（如 200Hz），debug 消息以更低频率发布以减少数据量。
+    uint32_t debug_publish_counter_{0};
+    uint32_t debug_publish_every_n_{4};  // 每 N 次控制循环发布一次 debug，默认 200/4 = 50Hz
 };
 
 }  // namespace fsmpx4
