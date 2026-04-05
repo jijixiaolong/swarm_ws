@@ -137,7 +137,7 @@ class SwarmEnuRvizNode(Node):
         self._tf_static_broadcaster: Optional[StaticTransformBroadcaster] = None
         self._entities: Dict[str, EntityState] = {}
         self._entity_order: List[str] = []
-        self._subscriptions = []
+        self._entity_subscriptions = []
         self._target_ned_pub = self.create_publisher(
             PoseStamped, "/swarm/cmd_target_ned", marker_qos
         )
@@ -166,7 +166,7 @@ class SwarmEnuRvizNode(Node):
             )
             self._entities[name] = entity
             self._entity_order.append(name)
-            self._subscriptions.append(
+            self._entity_subscriptions.append(
                 self.create_subscription(
                     VehicleGlobalPosition,
                     topic,
@@ -188,7 +188,7 @@ class SwarmEnuRvizNode(Node):
             )
             self._entities[payload.name] = payload
             self._entity_order.append(payload.name)
-            self._subscriptions.append(
+            self._entity_subscriptions.append(
                 self.create_subscription(
                     VehicleGlobalPosition,
                     self._payload_topic,

@@ -245,6 +245,9 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
             node.declare_parameter<double>("swarm.h_u_m", params.swarm.core.h_u_m), 1e-6);
         params.swarm.core.spring_k = clampMin(
             node.declare_parameter<double>("swarm.spring_k", params.swarm.core.spring_k), 0.0);
+        params.swarm.core.spring_force_clamp = clampMin(
+            node.declare_parameter<double>("swarm.spring_force_clamp",
+                                           params.swarm.core.spring_force_clamp), 0.0);
         params.swarm.core.damping_c1 = clampMin(
             node.declare_parameter<double>("swarm.damping_c1", params.swarm.core.damping_c1), 0.0);
         params.swarm.core.friction_c2 = clampMin(
@@ -278,16 +281,21 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
             node.declare_parameter<double>(
                 "swarm.payload_error_limit_z_m", params.swarm.core.payload_error_limit_z_m),
             0.0);
+        params.swarm.core.max_payload_velocity = clampMin(
+            node.declare_parameter<double>(
+                "swarm.max_payload_velocity", params.swarm.core.max_payload_velocity),
+            0.0);
+        params.swarm.core.structure_side_length_m = clampMin(
+            node.declare_parameter<double>(
+                "swarm.structure_reference.side_length_m",
+                params.swarm.core.structure_side_length_m),
+            0.0);
         params.swarm.core.rest_lengths_override = node.declare_parameter<std::vector<double>>(
             "swarm.structure_reference.rest_lengths", params.swarm.core.rest_lengths_override);
 
         // ── 编队收敛门控 ──────────────────────────────────────────────────────
         params.swarm.formation_gate.enabled = node.declare_parameter<bool>(
             "swarm.formation_gate.enabled", params.swarm.formation_gate.enabled);
-        params.swarm.formation_gate.beta_min = std::clamp(
-            node.declare_parameter<double>(
-                "swarm.formation_gate.beta_min", params.swarm.formation_gate.beta_min),
-            0.0, 1.5);
         params.swarm.formation_gate.struct_err_max = clampMin(
             node.declare_parameter<double>(
                 "swarm.formation_gate.struct_err_max", params.swarm.formation_gate.struct_err_max),

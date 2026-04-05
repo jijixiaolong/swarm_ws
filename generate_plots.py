@@ -203,6 +203,114 @@ def load_uav_kinematics(uid):
         )
     return load(f"px4_{uid}_fmu_out_vehicle_local_position.csv")
 
+
+def load_payload_kinematics():
+    """Load the payload trajectory from a full-rate source instead of planner debug."""
+    df = load("px4_4_fmu_out_vehicle_local_position.csv")
+    if df is not None and has_columns(df, "x", "y", "z", "vx", "vy", "vz"):
+        return df
+
+    df = load("swarm_rviz_payload_pose.csv")
+    if df is not None and has_columns(
+        df,
+        "pose.position.x",
+        "pose.position.y",
+        "pose.position.z",
+    ):
+        df = df.rename(
+            columns={
+                "pose.position.x": "x",
+                "pose.position.y": "y",
+                "pose.position.z": "z",
+            }
+        )
+        if "vx" not in df.columns:
+            df["vx"] = np.nan
+            df["vy"] = np.nan
+            df["vz"] = np.nan
+        return df
+
+    df = load("px4_1_swarm_planner_debug.csv")
+    if df is not None and has_columns(
+        df,
+        "payload_position_ned.x",
+        "payload_position_ned.y",
+        "payload_position_ned.z",
+        "payload_velocity_ned.x",
+        "payload_velocity_ned.y",
+        "payload_velocity_ned.z",
+    ):
+        return df.rename(
+            columns={
+                "payload_position_ned.x": "x",
+                "payload_position_ned.y": "y",
+                "payload_position_ned.z": "z",
+                "payload_velocity_ned.x": "vx",
+                "payload_velocity_ned.y": "vy",
+                "payload_velocity_ned.z": "vz",
+            }
+        )
+    return None
+
+
+def load_payload_target():
+    """Load the task target from a full-window command topic when available."""
+    df = load("swarm_cmd_target_ned.csv")
+    if df is not None and has_columns(df, "pose.position.x", "pose.position.y", "pose.position.z"):
+        return df.rename(
+            columns={
+                "pose.position.x": "x",
+                "pose.position.y": "y",
+                "pose.position.z": "z",
+            }
+        )
+
+    df = load("swarm_rviz_cmd_target_pose.csv")
+    if df is not None and has_columns(df, "pose.position.x", "pose.position.y", "pose.position.z"):
+        return df.rename(
+            columns={
+                "pose.position.x": "x",
+                "pose.position.y": "y",
+                "pose.position.z": "z",
+            }
+        )
+
+    df = load("px4_1_swarm_planner_debug.csv")
+    if df is not None and has_columns(
+        df,
+        "payload_target_ned.x",
+        "payload_target_ned.y",
+        "payload_target_ned.z",
+    ):
+        return df.rename(
+            columns={
+                "payload_target_ned.x": "x",
+                "payload_target_ned.y": "y",
+                "payload_target_ned.z": "z",
+            }
+        )
+    return None
+
+
+def plot_target_xy(ax, target_df, *, color="purple", label="Target", zorder=6):
+    if target_df is None or not has_columns(target_df, "x", "y"):
+        return
+
+    unique_xy = target_df[["x", "y"]].drop_duplicates()
+    if len(unique_xy) <= 1:
+        ax.scatter(
+            target_df["x"].iloc[-1],
+            target_df["y"].iloc[-1],
+            color=color,
+            marker="*",
+            s=120,
+            zorder=zorder,
+            label=label,
+        )
+        return
+
+    ax.plot(target_df["x"], target_df["y"], color=color, lw=1.2, ls=":", label=label)
+
 def quat_to_euler(q0, q1, q2, q3):
     """Convert quaternion [w,x,y,z] to Euler angles [roll,pitch,yaw] in degrees."""
     r = Rotation.from_quat(np.column_stack([q1, q2, q3, q0]))  # scipy: [x,y,z,w]
@@ -270,16 +378,15 @@ def plot_3d_trajectory():
         _scatter_ends(axes[1], df["x"], -df["z"],  c)
         _scatter_ends(axes[2], df["y"], -df["z"],  c)
 
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        px = dp["payload_position_ned.x"]
-        py = dp["payload_position_ned.y"]
-        pz = -dp["payload_position_ned.z"]
+    payload_df = load_payload_kinematics()
+    if payload_df is not None:
+        px = payload_df["x"]
+        py = payload_df["y"]
+        pz = -payload_df["z"]
         axes[0].plot(px, py, color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
         axes[1].plot(px, pz, color=PAYLOAD_COLOR, lw=1.5, ls='--')
         axes[2].plot(py, pz, color=PAYLOAD_COLOR, lw=1.5, ls='--')
-        axes[0].plot(dp["payload_target_ned.x"], dp["payload_target_ned.y"],
-                     color='purple', lw=1.0, ls=':', label="Target")
+    plot_target_xy(axes[0], load_payload_target())
 
     titles = ["Top view (XY)", "Front view (XZ)", "Side view (YZ)"]
     xlabels = ["X (m)", "X (m)", "Y (m)"]
@@ -307,12 +414,11 @@ def plot_xy_trajectory():
         ax.scatter(df["x"].iloc[-1], df["y"].iloc[-1], color=UAV_COLORS[uid],
                    marker='*', s=140, zorder=6, label=f"{UAV_LABELS[uid]} end")
 
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        ax.plot(dp["payload_position_ned.x"], dp["payload_position_ned.y"],
+    payload_df = load_payload_kinematics()
+    if payload_df is not None:
+        ax.plot(payload_df["x"], payload_df["y"],
                 color=PAYLOAD_COLOR, lw=1.8, ls='--', label="Payload", alpha=0.9)
-        ax.plot(dp["payload_target_ned.x"], dp["payload_target_ned.y"],
-                color='purple', lw=1.2, ls=':', label="Target", alpha=0.8)
+    plot_target_xy(ax, load_payload_target(), color='purple', label="Target")
 
     ax.set_xlabel("X NED (m)"); ax.set_ylabel("Y NED (m)")
     ax.set_title("Top-down Trajectory (XY) – color = time", fontsize=14, fontweight='bold')
@@ -323,24 +429,26 @@ def plot_xy_trajectory():
 # ── 3. Position vs time (X, Y, Z) – payload only ──────────────────────────────
 def plot_position_time():
     print("[3] Position vs time (payload)")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        print("   no planner data, skipping")
+    payload_df = load_payload_kinematics()
+    if payload_df is None:
+        print("   no payload data, skipping")
         return
+    target_df = load_payload_target()
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    axes[0].plot(dp["t"], dp["payload_position_ned.x"],
+    axes[0].plot(payload_df["t"], payload_df["x"],
                  color=PAYLOAD_COLOR, lw=1.5, ls='-', label="Payload")
-    axes[0].plot(dp["t"], dp["payload_target_ned.x"],
-                 color='purple', lw=1.0, ls='--', label="Target")
-    axes[1].plot(dp["t"], dp["payload_position_ned.y"],
+    axes[1].plot(payload_df["t"], payload_df["y"],
                  color=PAYLOAD_COLOR, lw=1.5, ls='-')
-    axes[1].plot(dp["t"], dp["payload_target_ned.y"],
-                 color='purple', lw=1.0, ls='--')
-    axes[2].plot(dp["t"], -dp["payload_position_ned.z"],
+    axes[2].plot(payload_df["t"], -payload_df["z"],
                  color=PAYLOAD_COLOR, lw=1.5, ls='-')
-    axes[2].plot(dp["t"], -dp["payload_target_ned.z"],
-                 color='purple', lw=1.0, ls='--')
+    if target_df is not None:
+        axes[0].plot(target_df["t"], target_df["x"],
+                     color='purple', lw=1.0, ls='--', label="Target")
+        axes[1].plot(target_df["t"], target_df["y"],
+                     color='purple', lw=1.0, ls='--')
+        axes[2].plot(target_df["t"], -target_df["z"],
+                     color='purple', lw=1.0, ls='--')
 
     labels = ["X (m)", "Y (m)", "Z (m, up+)"]
     for ax, lbl in zip(axes, labels):
@@ -363,11 +471,11 @@ def plot_velocity_time():
         axes[1].plot(df["t"], df["vy"], color=UAV_COLORS[uid], lw=1.2)
         axes[2].plot(df["t"], df["vz"], color=UAV_COLORS[uid], lw=1.2)
 
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        axes[0].plot(dp["t"], dp["payload_velocity_ned.x"], color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
-        axes[1].plot(dp["t"], dp["payload_velocity_ned.y"], color=PAYLOAD_COLOR, lw=1.5, ls='--')
-        axes[2].plot(dp["t"], dp["payload_velocity_ned.z"], color=PAYLOAD_COLOR, lw=1.5, ls='--')
+    payload_df = load_payload_kinematics()
+    if payload_df is not None and has_columns(payload_df, "vx", "vy", "vz"):
+        axes[0].plot(payload_df["t"], payload_df["vx"], color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
+        axes[1].plot(payload_df["t"], payload_df["vy"], color=PAYLOAD_COLOR, lw=1.5, ls='--')
+        axes[2].plot(payload_df["t"], payload_df["vz"], color=PAYLOAD_COLOR, lw=1.5, ls='--')
 
     for ax, lbl in zip(axes, ["Vx (m/s)", "Vy (m/s)", "Vz (m/s)"]):
         ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
@@ -719,12 +827,10 @@ def plot_speed():
         spd = np.sqrt(df["vx"]**2 + df["vy"]**2 + df["vz"]**2)
         ax.plot(df["t"], spd, color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
 
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        pspd = np.sqrt(dp["payload_velocity_ned.x"]**2 +
-                       dp["payload_velocity_ned.y"]**2 +
-                       dp["payload_velocity_ned.z"]**2)
-        ax.plot(dp["t"], pspd, color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
+    payload_df = load_payload_kinematics()
+    if payload_df is not None and has_columns(payload_df, "vx", "vy", "vz"):
+        pspd = np.sqrt(payload_df["vx"]**2 + payload_df["vy"]**2 + payload_df["vz"]**2)
+        ax.plot(payload_df["t"], pspd, color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
 
     ax.set_xlabel("Time (s)"); ax.set_ylabel("|V| (m/s)")
     ax.set_title("Total Speed vs Time", fontsize=14, fontweight='bold')
@@ -742,11 +848,13 @@ def plot_altitude():
         if df is None: continue
         ax.plot(df["t"], -df["z"], color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
 
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        ax.plot(dp["t"], -dp["payload_position_ned.z"],
+    payload_df = load_payload_kinematics()
+    if payload_df is not None:
+        ax.plot(payload_df["t"], -payload_df["z"],
                 color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
-        ax.plot(dp["t"], -dp["payload_target_ned.z"],
+    target_df = load_payload_target()
+    if target_df is not None:
+        ax.plot(target_df["t"], -target_df["z"],
                 color='purple', lw=1.0, ls=':', label="Target altitude")
 
     ax.set_xlabel("Time (s)"); ax.set_ylabel("Altitude (m, up+)")
@@ -893,6 +1001,7 @@ def plot_fsm_tracking():
 def plot_dashboard():
     print("[20] Summary dashboard")
     dp = load("px4_1_swarm_planner_debug.csv")
+    payload_df = load_payload_kinematics()
     fig = plt.figure(figsize=(18, 10))
     gs  = gridspec.GridSpec(2, 4, figure=fig, hspace=0.45, wspace=0.35)
 
@@ -902,8 +1011,8 @@ def plot_dashboard():
         df = load_uav_kinematics(uid)
         if df is None: continue
         ax3d.plot(df["x"], df["y"], color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
-    if dp is not None:
-        ax3d.plot(dp["payload_position_ned.x"], dp["payload_position_ned.y"],
+    if payload_df is not None:
+        ax3d.plot(payload_df["x"], payload_df["y"],
                   color=PAYLOAD_COLOR, lw=1.2, ls='--', label="Payload")
     ax3d.set_title("Top-down Trajectory (XY)", fontsize=10)
     ax3d.set_xlabel("X (m)"); ax3d.set_ylabel("Y (m)")
@@ -915,8 +1024,8 @@ def plot_dashboard():
         df = load_uav_kinematics(uid)
         if df is None: continue
         ax_alt.plot(df["t"], -df["z"], color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
-    if dp is not None:
-        ax_alt.plot(dp["t"], -dp["payload_position_ned.z"],
+    if payload_df is not None:
+        ax_alt.plot(payload_df["t"], -payload_df["z"],
                     color=PAYLOAD_COLOR, lw=1.2, ls='--', label="Payload")
     ax_alt.set_title("Altitude (m)"); ax_alt.legend(fontsize=7); ax_alt.grid(True, alpha=0.3)
 
@@ -937,6 +1046,9 @@ def plot_dashboard():
         if df is None: continue
         spd = np.sqrt(df["vx"]**2 + df["vy"]**2 + df["vz"]**2)
         ax_spd.plot(df["t"], spd, color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
+    if payload_df is not None and has_columns(payload_df, "vx", "vy", "vz"):
+        pspd = np.sqrt(payload_df["vx"]**2 + payload_df["vy"]**2 + payload_df["vz"]**2)
+        ax_spd.plot(payload_df["t"], pspd, color=PAYLOAD_COLOR, lw=1.2, ls='--', label="Payload")
     ax_spd.set_title("Speed (m/s)"); ax_spd.legend(fontsize=7); ax_spd.grid(True, alpha=0.3)
 
     # beta
@@ -1043,6 +1155,8 @@ def compute_rest_length_error_summary():
 def plot_paper_overview():
     print("[P1] Paper overview")
     dp = load("px4_1_swarm_planner_debug.csv")
+    payload_df = load_payload_kinematics()
+    target_df = load_payload_target()
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
     ax_xy, ax_alt = axes
 
@@ -1055,14 +1169,14 @@ def plot_paper_overview():
         ax_xy.scatter(df["x"].iloc[-1], df["y"].iloc[-1], color=UAV_COLORS[uid], marker='*', s=100, zorder=6)
         ax_alt.plot(df["t"], -df["z"], color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
 
-    if dp is not None:
-        ax_xy.plot(dp["payload_position_ned.x"], dp["payload_position_ned.y"],
+    if payload_df is not None:
+        ax_xy.plot(payload_df["x"], payload_df["y"],
                    color=PAYLOAD_COLOR, lw=2.0, ls='--', label="Payload")
-        ax_xy.plot(dp["payload_target_ned.x"], dp["payload_target_ned.y"],
-                   color='black', lw=1.2, ls=':', label="Target")
-        ax_alt.plot(dp["t"], -dp["payload_position_ned.z"],
+        ax_alt.plot(payload_df["t"], -payload_df["z"],
                     color=PAYLOAD_COLOR, lw=2.0, ls='--', label="Payload")
-        ax_alt.plot(dp["t"], -dp["payload_target_ned.z"],
+    if target_df is not None:
+        plot_target_xy(ax_xy, target_df, color='black', label="Target")
+        ax_alt.plot(target_df["t"], -target_df["z"],
                     color='black', lw=1.2, ls=':', label="Target")
 
     ax_xy.set_title("Top-Down Transport Trajectory", fontsize=13, fontweight='bold')

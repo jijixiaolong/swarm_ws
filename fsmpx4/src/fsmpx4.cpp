@@ -1,62 +1,23 @@
 #include "fsmpx4.h"
+#include "fsmpx4_utils.h"
 
 #include <algorithm>
-#include <cmath>
 #include <chrono>
 #include <cmath>
-#include <cstdint>
-#include <string_view>
-
-#include <geometry_msgs/msg/vector3.hpp>
 
 namespace fsmpx4
 {
 namespace
 {
-constexpr std::string_view toString(FSMPX4::State state)
-{
-    switch (state)
-    {
-        case FSMPX4::State::MANUAL_CTRL: return "MANUAL_CTRL";
-        case FSMPX4::State::OFFBOARD_STABILIZED: return "OFFBOARD_STABILIZED";
-        case FSMPX4::State::AUTO_TAKEOFF: return "AUTO_TAKEOFF";
-        case FSMPX4::State::AUTO_HOVER: return "AUTO_HOVER";
-        case FSMPX4::State::AUTO_LAND: return "AUTO_LAND";
-        case FSMPX4::State::CMD_CTRL: return "CMD_CTRL";
-    }
-    return "UNKNOWN";
-}
-
-constexpr uint8_t toDebugState(FSMPX4::State state)
-{
-    switch (state)
-    {
-        case FSMPX4::State::MANUAL_CTRL: return fsmpx4::msg::FSMDebug::STATE_MANUAL_CTRL;
-        case FSMPX4::State::OFFBOARD_STABILIZED: return fsmpx4::msg::FSMDebug::STATE_OFFBOARD_STABILIZED;
-        case FSMPX4::State::AUTO_TAKEOFF: return fsmpx4::msg::FSMDebug::STATE_AUTO_TAKEOFF;
-        case FSMPX4::State::AUTO_HOVER: return fsmpx4::msg::FSMDebug::STATE_AUTO_HOVER;
-        case FSMPX4::State::AUTO_LAND: return fsmpx4::msg::FSMDebug::STATE_AUTO_LAND;
-        case FSMPX4::State::CMD_CTRL: return fsmpx4::msg::FSMDebug::STATE_CMD_CTRL;
-    }
-    return fsmpx4::msg::FSMDebug::STATE_MANUAL_CTRL;
-}
-
-
-
-geometry_msgs::msg::Vector3 toVector3Msg(const swarm_planner::Vector3& v)
-{
-    geometry_msgs::msg::Vector3 msg;
-    msg.x = v.x();
-    msg.y = v.y();
-    msg.z = v.z();
-    return msg;
-}
+constexpr double kFormHoldHeightOffsetM = 0.1;
 }  // namespace
 
 //==============================================================================
 // Constructor
 //==============================================================================
 
+
+// 构造函数 初始化ros2节点，fsm手动模式  无人机状态的初始值
 FSMPX4::FSMPX4(const rclcpp::NodeOptions& options)
     : rclcpp::Node("fsmpx4_fsm", options),
       state_(State::MANUAL_CTRL),
@@ -271,6 +232,8 @@ void FSMPX4::initializeSubscribers()
 
 void FSMPX4::ControlLoop(double frequency_hz)
 {
+    debug_publish_every_n_ = std::max<uint32_t>(
+        1u, static_cast<uint32_t>(std::lround(frequency_hz / 20.0)));
     control_timer_ = create_wall_timer(
         std::chrono::microseconds(static_cast<int64_t>(1'000'000.0 / frequency_hz)),
         [this]() { process(); });
@@ -282,6 +245,7 @@ void FSMPX4::process()
 
     output_ = {};  output_.timestamp = now.seconds();
     cmd_ = {};     cmd_.timestamp = now.seconds();
+    swarm_debug_ready_ = false;
     swarm_state_.uavs[params_.swarm.self_index].update(
         {current_state_->position, current_state_->velocity}, now);
 
@@ -294,6 +258,10 @@ void FSMPX4::process()
     {
         debug_publish_counter_ = 0;
         publishDebugMessage(now);
+        if (swarm_debug_ready_)
+        {
+            publishSwarmDebugMessage(now, latest_swarm_debug_);
+        }
     }
 }
 
@@ -374,8 +342,7 @@ void FSMPX4::checkTransitions(const rclcpp::Time& now)
         if (rc_input_.is_command_mode)
         {
             swarm_planner::control::SwarmPlannerCore::Input input;
-            std::string reason;
-            if (buildSwarmInput(now, input, &reason))
+            if (buildSwarmInput(now, input))
             {
                 enterState(State::CMD_CTRL);
                 return;
@@ -383,7 +350,7 @@ void FSMPX4::checkTransitions(const rclcpp::Time& now)
             if (rc_input_.enter_command_mode)
             {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                                     "CMD_CTRL blocked: %s", reason.c_str());
+                                     "CMD_CTRL blocked: swarm input unavailable");
             }
             break;
         }
@@ -566,34 +533,33 @@ void FSMPX4::executeState(const rclcpp::Time& now)
 
         swarm_planner::control::SwarmPlannerCore::Input input;
         swarm_planner::control::SwarmPlannerCore::Output swarm_output;
-        std::string build_reason;
-        if (!buildSwarmInput(now, input, &build_reason))
+        if (!buildSwarmInput(now, input))
         {
             RCLCPP_WARN_THROTTLE(
                 get_logger(),
                 *get_clock(),
                 1000,
-                "CMD_CTRL swarm input unavailable: %s",
-                build_reason.c_str());
+                "CMD_CTRL swarm input unavailable");
             enterState(State::AUTO_HOVER);
             return;
         }
 
         // ── 编队收敛门控 ────────────────────────────────────────────────────
-        // Phase 0 (FORM_HOLD): 用当前 payload 位置替换目标
-        //   → 外环位置误差 = 0 → payload_ki 不累积 → 弹簧网络自由收敛
+        // Phase 0 (FORM_HOLD): 锁定进入 CMD_CTRL 时的 payload 位置作为目标，
+        //   并在 NED z 方向上额外抬高 0.1m，避免目标跟着当前载荷持续刷新。
         // Phase 1 (PAYLOAD_TRACK): 使用真实任务目标（input 不变）
         if (cmd_ctx_.phase == CmdPhase::FORM_HOLD)
         {
-            input.payload_target_ned = swarm_state_.load.value.pos;
+            input.payload_target_ned = cmd_ctx_.form_hold_target_ned;
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 2000,
-                "[CMD_CTRL] FORM_HOLD: waiting for formation convergence "
-                "(beta[0]=%.3f beta[1]=%.3f beta[2]=%.3f)",
-                0.0, 0.0, 0.0);  // filled in after compute
+                "[CMD_CTRL] FORM_HOLD: locked payload target=(%.2f, %.2f, %.2f)",
+                input.payload_target_ned.x(),
+                input.payload_target_ned.y(),
+                input.payload_target_ned.z());
         }
 
-        if (!swarm_core_.compute(input, swarm_output) || !swarm_output.valid)
+        if (!swarm_core_.compute(input, swarm_output))
         {
             RCLCPP_WARN_THROTTLE(
                 get_logger(),
@@ -604,7 +570,7 @@ void FSMPX4::executeState(const rclcpp::Time& now)
             return;
         }
 
-        // ── 检查是否升级到 PAYLOAD_TRACK ──────────────────────────────────
+        // ── 检查真实几何是否已收敛，可升级到 PAYLOAD_TRACK ────────────────
         if (cmd_ctx_.phase == CmdPhase::FORM_HOLD &&
             checkFormationQuality(swarm_output.debug, now))
         {
@@ -628,7 +594,8 @@ void FSMPX4::executeState(const rclcpp::Time& now)
         {
             publishAttitudeCommand(output_.qd, output_.thrust, now);
         }
-        publishSwarmDebugMessage(now, swarm_output.debug);
+        latest_swarm_debug_ = swarm_output.debug;
+        swarm_debug_ready_ = true;
         break;
     }
     }
@@ -663,6 +630,15 @@ void FSMPX4::enterState(State next_state)
         case State::CMD_CTRL:
             swarm_core_.reset();
             cmd_ctx_.reset();
+            cmd_ctx_.form_hold_target_ned = swarm_state_.load.value.pos;
+            RCLCPP_INFO(
+                get_logger(),
+                "CMD_CTRL: lock FORM_HOLD target to payload entry pose with %.2fm upward offset: "
+                "(%.2f, %.2f, %.2f)",
+                kFormHoldHeightOffsetM,
+                cmd_ctx_.form_hold_target_ned.x(),
+                cmd_ctx_.form_hold_target_ned.y(),
+                cmd_ctx_.form_hold_target_ned.z());
             break;
         default: break;
     }
@@ -685,30 +661,75 @@ bool FSMPX4::checkFormationQuality(
         return true;  // 门控关闭时直接放行
     }
 
-    // ── 指标1：所有 beta[i] ≥ beta_min（绳子绷紧到设计高度 beta_min × h_u）──
+    // ── 指标：真实 4 节点距离矩阵（3 UAV + payload）收敛 ──────────────────
+    // UAV-UAV 使用结构参考边长；UAV-payload 使用真实绳长参考。
+    double max_relative_error = 0.0;
+    std::array<int, Core::kNumUavs + 1> real_node_indices{};
     for (int i = 0; i < Core::kNumUavs; ++i)
     {
-        if (dbg.beta[i] < gate.beta_min)
+        real_node_indices[static_cast<size_t>(i)] = i;
+    }
+    constexpr int kPayloadNodeIndex = Core::kNumUavs + 1;
+    real_node_indices.back() = kPayloadNodeIndex;
+
+    const auto real_node_position =
+        [&dbg](int node_idx) -> const swarm_planner::Vector3&
+    {
+        return (node_idx < Core::kNumUavs)
+            ? dbg.uav_positions_ned[static_cast<size_t>(node_idx)]
+            : dbg.payload_position_ned;
+    };
+
+    bool has_reference_edge = false;
+    for (size_t a = 0; a < real_node_indices.size(); ++a)
+    {
+        for (size_t b = a + 1; b < real_node_indices.size(); ++b)
         {
-            cmd_ctx_.phase_ok_since = -1.0;  // 重置计时
-            return false;
+            const int i = real_node_indices[a];
+            const int j = real_node_indices[b];
+            const auto& p_i = real_node_position(i);
+            const auto& p_j = real_node_position(j);
+            const double actual_distance = (p_i - p_j).norm();
+
+            double reference_distance = 0.0;
+            const bool payload_edge =
+                (i == kPayloadNodeIndex) ^ (j == kPayloadNodeIndex);
+            if (payload_edge)
+            {
+                reference_distance = params_.swarm.rope_length_m;
+            }
+            else
+            {
+                reference_distance =
+                    dbg.rest_lengths[static_cast<size_t>(i * Core::kNumNodes + j)];
+            }
+            if (reference_distance <= 1e-6)
+            {
+                continue;
+            }
+
+            has_reference_edge = true;
+            const double relative_error =
+                std::abs(actual_distance - reference_distance) / reference_distance;
+            max_relative_error = std::max(max_relative_error, relative_error);
         }
     }
+    if (!has_reference_edge || max_relative_error > gate.struct_err_max)
+    {
+        cmd_ctx_.phase_ok_since = -1.0;  // 重置计时
+        return false;
+    }
 
-    // ── 指标2（已移除）：UAV–anchor 距离误差检查 ─────────────────────────────
-    // 实测：UAV-anchor 实际距离远超 rest_length(0.54m) 的 20% 容差，
-    // 原因是飞行时悬挂姿态与静态设计构型有明显差异。
-    // beta[i] 已经是绳子绷紧程度的直接指标，单独使用即可。
-    (void)gate.struct_err_max;  // suppress unused warning
-
-    // ── 两项均满足：开始计时 ─────────────────────────────────────────────────
+    // ── 距离误差满足：开始计时 ────────────────────────────────────────────────
     const double now_s = now.seconds();
     if (cmd_ctx_.phase_ok_since < 0.0)
     {
         cmd_ctx_.phase_ok_since = now_s;
         RCLCPP_INFO(
             get_logger(),
-            "[CMD_CTRL] Formation quality OK, holding for %.1f s before PAYLOAD_TRACK",
+            "[CMD_CTRL] Real UAV-payload distance matrix converged (max relative error %.3f), "
+            "holding for %.1f s before PAYLOAD_TRACK",
+            max_relative_error,
             gate.hold_duration_s);
     }
 
@@ -728,17 +749,12 @@ bool FSMPX4::positionReady(const rclcpp::Time& now)
 
 bool FSMPX4::buildSwarmInput(
     const rclcpp::Time& now,
-    swarm_planner::control::SwarmPlannerCore::Input& input,
-    std::string* reason) const
+    swarm_planner::control::SwarmPlannerCore::Input& input) const
 {
     for (size_t i = 0; i < swarm_planner::kNumUavs; ++i)
     {
         if (!swarm_state_.uavs[i].fresh(now, params_.swarm.data_timeout_s))
         {
-            if (reason)
-            {
-                *reason = "uav state timeout idx=" + std::to_string(i);
-            }
             return false;
         }
 
@@ -748,10 +764,6 @@ bool FSMPX4::buildSwarmInput(
 
     if (!swarm_state_.load.fresh(now, params_.swarm.data_timeout_s))
     {
-        if (reason)
-        {
-            *reason = "payload state timeout";
-        }
         return false;
     }
 
@@ -760,11 +772,6 @@ bool FSMPX4::buildSwarmInput(
     input.payload_target_ned = params_.swarm.target_ned;
     input.self_index = params_.swarm.self_index;
     input.mass = params_.swarm.mass;
-
-    if (reason)
-    {
-        reason->clear();
-    }
     return true;
 }
 
@@ -849,152 +856,5 @@ void FSMPX4::publishAttitudeCommand(
 //==============================================================================
 // Debug
 //==============================================================================
-
-void FSMPX4::publishDebugMessage(const rclcpp::Time& stamp)
-{
-    if (debug_pub_->get_subscription_count() == 0 &&
-        debug_pub_->get_intra_process_subscription_count() == 0)
-    {
-        return;
-    }
-
-    fsmpx4::msg::FSMDebug msg;
-    msg.header.stamp = stamp;
-    msg.header.frame_id = get_fully_qualified_name();
-    msg.fsm_state = toDebugState(state_);
-    msg.fsm_state_name = std::string(toString(state_));
-
-    const auto& s = *current_state_;
-    msg.uav_position.x = s.position.x();
-    msg.uav_position.y = s.position.y();
-    msg.uav_position.z = s.position.z();
-    msg.uav_velocity.x = s.velocity.x();
-    msg.uav_velocity.y = s.velocity.y();
-    msg.uav_velocity.z = s.velocity.z();
-    msg.uav_angular_velocity.x = s.angular_velocity.x();
-    msg.uav_angular_velocity.y = s.angular_velocity.y();
-    msg.uav_angular_velocity.z = s.angular_velocity.z();
-    msg.uav_hover_thrust = s.hover_thrust;
-    {
-        Eigen::Quaterniond q(s.rotation);
-        q.normalize();
-        msg.uav_attitude.w = q.w();
-        msg.uav_attitude.x = q.x();
-        msg.uav_attitude.y = q.y();
-        msg.uav_attitude.z = q.z();
-    }
-
-    msg.cmd_position.x = cmd_.position.x();
-    msg.cmd_position.y = cmd_.position.y();
-    msg.cmd_position.z = cmd_.position.z();
-    msg.cmd_velocity.x = cmd_.velocity.x();
-    msg.cmd_velocity.y = cmd_.velocity.y();
-    msg.cmd_velocity.z = cmd_.velocity.z();
-    msg.cmd_acceleration.x = cmd_.acceleration.x();
-    msg.cmd_acceleration.y = cmd_.acceleration.y();
-    msg.cmd_acceleration.z = cmd_.acceleration.z();
-    msg.cmd_b1d.x = cmd_.b1d.x();
-    msg.cmd_b1d.y = cmd_.b1d.y();
-    msg.cmd_b1d.z = cmd_.b1d.z();
-    msg.cmd_yaw = cmd_.yaw_desired;
-
-    msg.control_thrust_vector.x = output_.thrust_vector.x();
-    msg.control_thrust_vector.y = output_.thrust_vector.y();
-    msg.control_thrust_vector.z = output_.thrust_vector.z();
-    msg.control_thrust = output_.thrust;
-    msg.control_moment.x = output_.moment.x();
-    msg.control_moment.y = output_.moment.y();
-    msg.control_moment.z = output_.moment.z();
-    msg.control_acceleration.x = output_.A.x();
-    msg.control_acceleration.y = output_.A.y();
-    msg.control_acceleration.z = output_.A.z();
-
-    const Eigen::Quaterniond q = output_.qd.normalized();
-    msg.cmd_attitude.w = q.w();
-    msg.cmd_attitude.x = q.x();
-    msg.cmd_attitude.y = q.y();
-    msg.cmd_attitude.z = q.z();
-    msg.control_attitude.w = q.w();
-    msg.control_attitude.x = q.x();
-    msg.control_attitude.y = q.y();
-    msg.control_attitude.z = q.z();
-    msg.control_valid = output_.valid;
-
-    debug_pub_->publish(std::move(msg));
-}
-
-void FSMPX4::publishSwarmDebugMessage(
-    const rclcpp::Time& stamp,
-    const swarm_planner::control::SwarmPlannerCore::DebugState& debug)
-{
-    // 与 publishDebugMessage 使用同一降频逻辑：计数器不为0说明本轮不发布
-    if (debug_publish_counter_ != 0)
-    {
-        return;
-    }
-    if (swarm_debug_pub_->get_subscription_count() == 0 &&
-        swarm_debug_pub_->get_intra_process_subscription_count() == 0)
-    {
-        return;
-    }
-
-    swarm_planner::msg::SwarmPlannerDebug msg;
-    msg.header.stamp = stamp;
-    msg.header.frame_id = "ned";
-    msg.self_index = debug.self_index;
-    msg.mass = debug.mass;
-    msg.structure_locked = debug.structure_locked;
-    msg.valid = debug.valid;
-    msg.payload_position_ned = toVector3Msg(debug.payload_position_ned);
-    msg.payload_velocity_ned = toVector3Msg(debug.payload_velocity_ned);
-    msg.payload_target_ned = toVector3Msg(debug.payload_target_ned);
-
-    for (size_t i = 0; i < swarm_planner::kNumUavs; ++i)
-    {
-        msg.uav_positions_ned[i] = toVector3Msg(debug.uav_positions_ned[i]);
-        msg.uav_velocities_ned[i] = toVector3Msg(debug.uav_velocities_ned[i]);
-        msg.beta[i] = debug.beta[i];
-    }
-
-    for (size_t i = 0; i < debug.virtual_positions_ned.size(); ++i)
-    {
-        msg.virtual_positions_ned[i] = toVector3Msg(debug.virtual_positions_ned[i]);
-        msg.virtual_velocities_ned[i] = toVector3Msg(debug.virtual_velocities_ned[i]);
-    }
-
-    for (size_t i = 0; i < debug.rest_lengths.size(); ++i)
-    {
-        msg.rest_lengths[i] = debug.rest_lengths[i];
-    }
-
-    msg.passive_force = toVector3Msg(debug.passive_force);
-    msg.tracking_input = toVector3Msg(debug.tracking_input);
-    msg.virtual_acceleration = toVector3Msg(debug.virtual_acceleration);
-    msg.mapped_acceleration = toVector3Msg(debug.mapped_acceleration);
-    msg.desired_acceleration = toVector3Msg(debug.desired_acceleration);
-    swarm_debug_pub_->publish(std::move(msg));
-}
-
-void FSMPX4::logLoadedParams() const
-{
-    RCLCPP_INFO(get_logger(), "频率: %.0fHz 悬停: %.3f", params_.basic.ctrl_freq_max, params_.thr_map.hover_percentage);
-    RCLCPP_INFO(get_logger(), "原点: lat=%.8f lon=%.8f alt=%.2fm",
-                params_.position.gps_origin_latitude_deg,
-                params_.position.gps_origin_longitude_deg,
-                params_.position.gps_origin_altitude_m);
-    RCLCPP_INFO(get_logger(), "起飞: h=%.1fm v=%.1fm/s idle=%.1fs timeout=%.0fs",
-                params_.takeoff.target_height_m, params_.takeoff.ascent_velocity_m_s,
-                params_.takeoff.idle_duration_s, params_.takeoff.timeout_s);
-    RCLCPP_INFO(get_logger(), "编队: self=%d mass=%.2f target=(%.2f,%.2f,%.2f)",
-                params_.swarm.self_index, params_.swarm.mass,
-                params_.swarm.target_ned.x(), params_.swarm.target_ned.y(), params_.swarm.target_ned.z());
-    RCLCPP_INFO(get_logger(), "载荷: global=%s local=%s",
-                params_.swarm.payload_global_position_topic.c_str(),
-                params_.swarm.payload_local_position_topic.c_str());
-    RCLCPP_INFO(get_logger(), "增益: Kp=(%.2f,%.2f,%.2f) Kv=(%.2f,%.2f,%.2f)",
-                params_.gains.Kp_x, params_.gains.Kp_y, params_.gains.Kp_z,
-                params_.gains.Kv_x, params_.gains.Kv_y, params_.gains.Kv_z);
-    RCLCPP_INFO(get_logger(), "推力: [%.3f, %.3f] mass=%.2fkg", params_.limits.min_thrust, params_.limits.max_thrust, params_.physical.mass);
-}
 
 }  // namespace fsmpx4

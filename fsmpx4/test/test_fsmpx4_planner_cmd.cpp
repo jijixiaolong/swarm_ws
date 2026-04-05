@@ -35,6 +35,8 @@ constexpr double kPayloadAltM = kOriginAltM + 1.0;
 constexpr double kPayloadVx = 0.2;
 constexpr double kPayloadVy = -0.15;
 constexpr double kPayloadVz = 0.05;
+constexpr double kMetersPerLatDeg = 111111.0;
+constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
 
 std::vector<double> restLengths()
 {
@@ -87,6 +89,18 @@ px4_msgs::msg::VehicleGlobalPosition makeGlobalPosition(
     msg.lon = lon;
     msg.alt = static_cast<float>(alt);
     return msg;
+}
+
+px4_msgs::msg::VehicleGlobalPosition makeGlobalPositionFromNed(
+    double north,
+    double east,
+    double down)
+{
+    const double meters_per_lon_deg = kMetersPerLatDeg * std::cos(kOriginLatDeg * kDegToRad);
+    return makeGlobalPosition(
+        kOriginLatDeg + north / kMetersPerLatDeg,
+        kOriginLonDeg + east / meters_per_lon_deg,
+        kOriginAltM - down);
 }
 
 px4_msgs::msg::VehicleLocalPosition makeLocalPosition(
@@ -157,7 +171,7 @@ px4_msgs::msg::VehicleAttitudeSetpoint makeExpectedPlannerOutput()
     }
 
     swarm_planner::control::SwarmPlannerCore::Output swarm_output;
-    if (!core.compute(input, swarm_output) || !swarm_output.valid)
+    if (!core.compute(input, swarm_output))
     {
         throw std::runtime_error("swarm planner compute failed");
     }
@@ -298,6 +312,11 @@ protected:
             [this](const fsmpx4::msg::FSMDebug::SharedPtr msg) {
                 debug_messages_.push_back(*msg);
             });
+        swarm_debug_sub_ = io_node_->create_subscription<swarm_planner::msg::SwarmPlannerDebug>(
+            "/swarm_planner/debug", rclcpp::QoS(10).reliable(),
+            [this](const swarm_planner::msg::SwarmPlannerDebug::SharedPtr msg) {
+                swarm_debug_messages_.push_back(*msg);
+            });
 
         executor_.add_node(fsm_);
         executor_.add_node(io_node_);
@@ -308,6 +327,7 @@ protected:
     {
         executor_.remove_node(io_node_);
         executor_.remove_node(fsm_);
+        swarm_debug_sub_.reset();
         debug_sub_.reset();
         output_sub_.reset();
         payload_local_pub_.reset();
@@ -320,6 +340,7 @@ protected:
         rc_pub_.reset();
         io_node_.reset();
         fsm_.reset();
+        swarm_debug_messages_.clear();
         debug_messages_.clear();
         forwarded_.clear();
     }
@@ -340,6 +361,17 @@ protected:
         local_pos_pub_->publish(makeLocalPosition());
     }
 
+    void publishSelfSensors(
+        const swarm_planner::Vector3& position_ned,
+        const swarm_planner::Vector3& velocity_ned = swarm_planner::Vector3::Zero())
+    {
+        attitude_pub_->publish(makeAttitude());
+        global_pos_pub_->publish(makeGlobalPositionFromNed(
+            position_ned.x(), position_ned.y(), position_ned.z()));
+        local_pos_pub_->publish(makeLocalPosition(
+            velocity_ned.x(), velocity_ned.y(), velocity_ned.z(), kOriginAltM, position_ned.z()));
+    }
+
     void publishSwarmSensors()
     {
         peer_global_pubs_[0]->publish(
@@ -350,6 +382,37 @@ protected:
         peer_local_pubs_[1]->publish(makeLocalPosition(0.0, -0.1, 0.0));
         payload_global_pub_->publish(makeGlobalPosition(kPayloadLatDeg, kPayloadLonDeg, kPayloadAltM));
         payload_local_pub_->publish(makeLocalPosition(kPayloadVx, kPayloadVy, kPayloadVz));
+    }
+
+    void publishSwarmSensors(
+        const std::array<swarm_planner::Vector3, 2>& peer_positions_ned,
+        const swarm_planner::Vector3& payload_position_ned,
+        std::array<swarm_planner::Vector3, 2> peer_velocities_ned =
+            {swarm_planner::Vector3::Zero(), swarm_planner::Vector3::Zero()},
+        swarm_planner::Vector3 payload_velocity_ned = swarm_planner::Vector3::Zero())
+    {
+        for (size_t i = 0; i < peer_positions_ned.size(); ++i)
+        {
+            peer_global_pubs_[i]->publish(makeGlobalPositionFromNed(
+                peer_positions_ned[i].x(),
+                peer_positions_ned[i].y(),
+                peer_positions_ned[i].z()));
+            peer_local_pubs_[i]->publish(makeLocalPosition(
+                peer_velocities_ned[i].x(),
+                peer_velocities_ned[i].y(),
+                peer_velocities_ned[i].z(),
+                kOriginAltM,
+                peer_positions_ned[i].z()));
+        }
+
+        payload_global_pub_->publish(makeGlobalPositionFromNed(
+            payload_position_ned.x(), payload_position_ned.y(), payload_position_ned.z()));
+        payload_local_pub_->publish(makeLocalPosition(
+            payload_velocity_ned.x(),
+            payload_velocity_ned.y(),
+            payload_velocity_ned.z(),
+            kOriginAltM,
+            payload_position_ned.z()));
     }
 
     void publishRc(double aux1, double aux2)
@@ -378,7 +441,9 @@ protected:
     rclcpp::Publisher<px4_msgs::msg::VehicleLocalPosition>::SharedPtr payload_local_pub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr output_sub_;
     rclcpp::Subscription<fsmpx4::msg::FSMDebug>::SharedPtr debug_sub_;
+    rclcpp::Subscription<swarm_planner::msg::SwarmPlannerDebug>::SharedPtr swarm_debug_sub_;
     std::vector<fsmpx4::msg::FSMDebug> debug_messages_;
+    std::vector<swarm_planner::msg::SwarmPlannerDebug> swarm_debug_messages_;
     std::vector<px4_msgs::msg::VehicleAttitudeSetpoint> forwarded_;
 };
 
@@ -477,4 +542,40 @@ TEST_F(FSMPX4PlannerCmdTest, DebugTopicCarriesFsmState)
     debug_msg = debug_messages_.back();
     EXPECT_EQ(debug_msg.fsm_state, fsmpx4::msg::FSMDebug::STATE_AUTO_HOVER);
     EXPECT_EQ(debug_msg.fsm_state_name, "AUTO_HOVER");
+}
+
+TEST_F(FSMPX4PlannerCmdTest, FormationGateRequiresRealPayloadGeometryToConverge)
+{
+    const swarm_planner::Vector3 self_position_ned(0.0, 0.0, 0.0);
+    const std::array<swarm_planner::Vector3, 2> peer_positions_ned{
+        swarm_planner::Vector3(0.98, 0.0, 0.0),
+        swarm_planner::Vector3(0.49, 0.85, 0.0)};
+    const swarm_planner::Vector3 payload_position_ned(0.2, 0.0, 0.3);
+
+    publishSelfSensors(self_position_ned);
+    publishRc(1.0, -1.0);
+    step();
+    EXPECT_EQ(fsm_->currentState(), fsmpx4::FSMPX4::State::OFFBOARD_STABILIZED);
+
+    publishSelfSensors(self_position_ned);
+    publishRc(1.0, 0.2);
+    step();
+    EXPECT_EQ(fsm_->currentState(), fsmpx4::FSMPX4::State::AUTO_HOVER);
+
+    for (int i = 0; i < 12; ++i)
+    {
+        publishSelfSensors(self_position_ned);
+        publishSwarmSensors(peer_positions_ned, payload_position_ned);
+        publishRc(1.0, 1.0);
+        step();
+        EXPECT_EQ(fsm_->currentState(), fsmpx4::FSMPX4::State::CMD_CTRL);
+        std::this_thread::sleep_for(110ms);
+    }
+
+    ASSERT_FALSE(swarm_debug_messages_.empty());
+    const auto& swarm_debug = swarm_debug_messages_.back();
+    EXPECT_EQ(swarm_debug.cmd_phase_name, "FORM_HOLD");
+    EXPECT_NEAR(swarm_debug.payload_target_ned.x, payload_position_ned.x(), 1.0e-3);
+    EXPECT_NEAR(swarm_debug.payload_target_ned.y, payload_position_ned.y(), 1.0e-3);
+    EXPECT_NEAR(swarm_debug.payload_target_ned.z, payload_position_ned.z() - 0.1, 1.0e-3);
 }

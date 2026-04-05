@@ -66,8 +66,7 @@ private:
     bool positionReady(const rclcpp::Time& now);
     bool buildSwarmInput(
         const rclcpp::Time& now,
-        swarm_planner::control::SwarmPlannerCore::Input& input,
-        std::string* reason = nullptr) const;
+        swarm_planner::control::SwarmPlannerCore::Input& input) const;
     bool landDetectedReady(const rclcpp::Time& now) const;
     void fallbackToManual(const char* reason);
     /// 检查编队质量是否满足切换到 PAYLOAD_TRACK 的条件
@@ -150,8 +149,10 @@ private:
 
     // ── Debug publish throttling ──
     // 控制回路运行在高频（如 200Hz），debug 消息以更低频率发布以减少数据量。
+    swarm_planner::control::SwarmPlannerCore::DebugState latest_swarm_debug_{};
+    bool swarm_debug_ready_{false};
     uint32_t debug_publish_counter_{0};
-    uint32_t debug_publish_every_n_{4};  // 每 N 次控制循环发布一次 debug，默认 200/4 = 50Hz
+    uint32_t debug_publish_every_n_{10};  // 根据控制频率换算为约 20Hz，200Hz 时为 10
 };
 
 }  // namespace fsmpx4

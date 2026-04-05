@@ -4,6 +4,7 @@ int32 self_index
 float64 mass
 bool structure_locked
 bool valid
+string cmd_phase_name
 
 geometry_msgs/Vector3 payload_position_ned
 geometry_msgs/Vector3 payload_velocity_ned

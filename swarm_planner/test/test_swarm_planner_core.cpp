@@ -61,7 +61,6 @@ TEST(SwarmPlannerCoreTest, ProducesFiniteAccelerationAndUsesConfiguredStructure)
     auto input = makeInput();
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
-    EXPECT_TRUE(output.valid);
     EXPECT_TRUE(core.ready());
     EXPECT_TRUE(output.desired_acceleration.allFinite());
 }
@@ -93,7 +92,6 @@ TEST(SwarmPlannerCoreTest, ResetPreservesConfiguredStructureReference)
 
     EXPECT_TRUE(core.ready());
     ASSERT_TRUE(core.compute(input, output));
-    EXPECT_TRUE(output.valid);
     EXPECT_GT(second_accel_x, first_accel_x);
     EXPECT_NEAR(output.desired_acceleration.x(), first_accel_x, 1e-6);
 }
@@ -117,6 +115,25 @@ TEST(SwarmPlannerCoreTest, UsesConfiguredRestLengthsOverrideWhenProvided)
     EXPECT_DOUBLE_EQ(output.debug.rest_lengths[1], 3.0);
     EXPECT_DOUBLE_EQ(output.debug.rest_lengths[9], 9.0);
     EXPECT_DOUBLE_EQ(output.debug.rest_lengths[19], 1.0);
+}
+
+TEST(SwarmPlannerCoreTest, GeneratesRestLengthsFromSideLengthAndVirtualHeight)
+{
+    swarm_planner::control::SwarmPlannerCore core;
+    swarm_planner::control::SwarmPlannerCore::Config cfg;
+    cfg.h_u_m = 0.9;
+    cfg.structure_side_length_m = 1.1;
+    ASSERT_TRUE(core.initialize(cfg));
+
+    auto input = makeInput();
+    swarm_planner::control::SwarmPlannerCore::Output output;
+    ASSERT_TRUE(core.compute(input, output));
+    const double radius = cfg.structure_side_length_m / std::sqrt(3.0);
+    const double payload_distance = std::hypot(radius, cfg.h_u_m);
+    EXPECT_NEAR(output.debug.rest_lengths[1], cfg.structure_side_length_m, 1e-9);
+    EXPECT_NEAR(output.debug.rest_lengths[3], radius, 1e-9);
+    EXPECT_NEAR(output.debug.rest_lengths[4], payload_distance, 1e-9);
+    EXPECT_NEAR(output.debug.rest_lengths[19], cfg.h_u_m, 1e-9);
 }
 
 TEST(SwarmPlannerCoreTest, RejectsMalformedRestLengthsOverride)
@@ -154,8 +171,6 @@ TEST(SwarmPlannerCoreTest, MappingScalesVirtualAccelerationByBeta)
 
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
-    ASSERT_TRUE(output.valid);
-
     const swarm_planner::Vector3 desired_payload_velocity =
         -cfg.payload_kp * (input.payload_position_ned - input.payload_target_ned);
     const swarm_planner::Vector3 expected =

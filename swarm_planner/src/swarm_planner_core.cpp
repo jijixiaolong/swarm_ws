@@ -16,6 +16,33 @@ constexpr double kFixedComputeDtS = 1.0 / 200.0;
 using RestLengthMatrix =
     Eigen::Matrix<double, SwarmPlannerCore::kNumNodes, SwarmPlannerCore::kNumNodes>;
 
+RestLengthMatrix buildEquilateralRestLengthMatrix(double side_length, double h_u)
+{
+    RestLengthMatrix m = RestLengthMatrix::Zero();
+    const double radius = side_length / std::sqrt(3.0);
+    const double payload_distance = std::hypot(radius, h_u);
+
+    for (int i = 0; i < SwarmPlannerCore::kNumUavs; ++i)
+    {
+        for (int j = 0; j < SwarmPlannerCore::kNumUavs; ++j)
+        {
+            if (i != j)
+            {
+                m(i, j) = side_length;
+            }
+        }
+
+        m(i, SwarmPlannerCore::kNumUavs) = radius;
+        m(SwarmPlannerCore::kNumUavs, i) = radius;
+        m(i, SwarmPlannerCore::kNumUavs + 1) = payload_distance;
+        m(SwarmPlannerCore::kNumUavs + 1, i) = payload_distance;
+    }
+
+    m(SwarmPlannerCore::kNumUavs, SwarmPlannerCore::kNumUavs + 1) = h_u;
+    m(SwarmPlannerCore::kNumUavs + 1, SwarmPlannerCore::kNumUavs) = h_u;
+    return m;
+}
+
 Vector3 computeVelocityErrorDerivative(
     const Vector3& error,
     const Vector3& prev_error,
@@ -104,6 +131,16 @@ Vector3 SwarmPlannerCore::clipNorm(const Vector3& v, const double max_norm)
 bool SwarmPlannerCore::loadRestLengths()
 {
     const auto& v = cfg_.rest_lengths_override;
+    if (v.empty())
+    {
+        if (!std::isfinite(cfg_.structure_side_length_m) || cfg_.structure_side_length_m <= 0.0)
+        {
+            return false;
+        }
+        rest_lengths_ = buildEquilateralRestLengthMatrix(cfg_.structure_side_length_m, cfg_.h_u_m);
+        return true;
+    }
+
     if (v.size() != static_cast<size_t>(kNumNodes * kNumNodes))
     {
         return false;
@@ -196,7 +233,12 @@ Vector3 SwarmPlannerCore::computeDesiredPayloadVelocity(
     if (cfg_.payload_ki <= 0.0)
     {
         payload_position_integral_.setZero();
-        return -cfg_.payload_kp * position_error;
+        Vector3 v_des = -cfg_.payload_kp * position_error;
+        if (cfg_.max_payload_velocity > 0.0)
+        {
+            v_des = clipNorm(v_des, cfg_.max_payload_velocity);
+        }
+        return v_des;
     }
 
     // 只对 Z 轴（高度）积分，消除重力引起的高度静差；X/Y 保持纯比例，避免水平振荡。
@@ -209,8 +251,16 @@ Vector3 SwarmPlannerCore::computeDesiredPayloadVelocity(
              std::abs(cfg_.payload_integral_limit));
     }
 
-    return -cfg_.payload_kp * position_error
-           - cfg_.payload_ki * payload_position_integral_;
+    Vector3 v_desired = -cfg_.payload_kp * position_error
+                        - cfg_.payload_ki * payload_position_integral_;
+
+    // 速度限幅：防止大位置误差产生过高的期望速度导致摆锤超调
+    if (cfg_.max_payload_velocity > 0.0)
+    {
+        v_desired = clipNorm(v_desired, cfg_.max_payload_velocity);
+    }
+
+    return v_desired;
 }
 
 Vector3 SwarmPlannerCore::computePassiveNetworkForce(
@@ -232,7 +282,16 @@ Vector3 SwarmPlannerCore::computePassiveNetworkForce(
 
         const Vector3 diff = q_i - state.q[j];
         const double length = diff.norm();
-        spring_force += cfg_.spring_k * (1.0 - rest_lengths_(self_index, j) / length) * diff;
+        Vector3 pair_spring = cfg_.spring_k * (1.0 - rest_lengths_(self_index, j) / length) * diff;
+        if (cfg_.spring_force_clamp > 0.0)
+        {
+            const double mag = pair_spring.norm();
+            if (mag > cfg_.spring_force_clamp)
+            {
+                pair_spring *= cfg_.spring_force_clamp / mag;
+            }
+        }
+        spring_force += pair_spring;
         damping_force += cfg_.damping_c1 * (qdot_i - state.qdot[j]);
     }
 
@@ -301,7 +360,6 @@ bool SwarmPlannerCore::compute(const Input& input, Output& output)
     }
 
     output.desired_acceleration = desired_acceleration;
-    output.valid = true;
 
     auto& dbg = output.debug;
     dbg.uav_positions_ned = input.uav_positions_ned;

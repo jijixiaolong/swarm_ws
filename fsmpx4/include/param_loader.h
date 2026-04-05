@@ -92,8 +92,7 @@ struct FSMParams
         /// 编队收敛门控：进入 PAYLOAD_TRACK 前先让弹簧网络收敛
         struct FormationGate {
             bool   enabled{true};
-            double beta_min{0.90};        ///< 所有 beta[i] 须达到此值
-            double struct_err_max{0.20};  ///< UAV–anchor 距离相对误差上限
+            double struct_err_max{0.20};  ///< 真实距离矩阵相对误差上限（UAV-UAV + UAV-payload）
             double hold_duration_s{1.0};  ///< 连续满足后需再保持多久
         } formation_gate;
     } swarm;

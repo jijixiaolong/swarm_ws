@@ -22,6 +22,7 @@ public:
     {
         double h_u_m{1.0};
         double spring_k{1.2};
+        double spring_force_clamp{0.0};  // per-edge spring force clamp (N); 0 = disabled
         double damping_c1{0.8};
         double friction_c2{0.3};
         double vel_pid_kp{1.0};
@@ -34,6 +35,8 @@ public:
         double payload_integral_limit{2.0};
         double payload_error_limit_xy_m{0.6};
         double payload_error_limit_z_m{0.5};
+        double max_payload_velocity{0.0};  // desired payload velocity norm clamp (m/s); 0 = disabled
+        double structure_side_length_m{0.0};
         std::vector<double> rest_lengths_override{};
     };
 
@@ -73,7 +76,6 @@ public:
     struct Output
     {
         Vector3 desired_acceleration{Vector3::Zero()};
-        bool valid{false};
         DebugState debug{};
     };
 

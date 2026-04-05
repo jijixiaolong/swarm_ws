@@ -46,7 +46,11 @@ ament_target_dependencies(fsmpx4_param_loader rclcpp Eigen3 swarm_planner)
 
 # ── FSM Component (shared library) ──
 
-add_library(fsmpx4_fsm SHARED src/fsmpx4.cpp)
+add_library(fsmpx4_fsm SHARED
+  src/fsmpx4.cpp
+  src/fsmpx4_debug.cpp
+  src/fsmpx4_utils.cpp
+)
 target_include_directories(fsmpx4_fsm PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${swarm_planner_INCLUDE_DIRS})
 target_link_libraries(fsmpx4_fsm
   fsmpx4_input

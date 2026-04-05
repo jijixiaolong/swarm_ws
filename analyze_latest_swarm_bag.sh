@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT="$SCRIPT_DIR"
+SRC_ROOT="$SCRIPT_DIR"
+WORKSPACE_ROOT=$(cd -- "$SRC_ROOT/.." && pwd)
 
 usage() {
   cat <<'EOF'
@@ -59,7 +60,7 @@ run_python() {
 }
 
 BAG_DIR=""
-DATA_ROOT="$REPO_ROOT/data"
+DATA_ROOT="$SRC_ROOT/data"
 ANALYSIS_DIR=""
 PROFILE="both"
 WINDOW="full"
@@ -130,11 +131,11 @@ if [[ -f /opt/ros/humble/setup.bash ]]; then
   set -u
 fi
 
-if [[ -f "$REPO_ROOT/install/setup.bash" ]]; then
-  # Prefer the local workspace environment when it exists.
+if [[ -f "$WORKSPACE_ROOT/install/setup.bash" ]]; then
+  # Prefer the parent colcon workspace overlay when it exists.
   # shellcheck disable=SC1091
   set +u
-  source "$REPO_ROOT/install/setup.bash"
+  source "$WORKSPACE_ROOT/install/setup.bash"
   set -u
 fi
 
@@ -157,7 +158,7 @@ echo "Storage ID:  $STORAGE_ID"
 echo
 
 echo "[1/2] Exporting rosbag to CSV"
-run_python "$REPO_ROOT/fsmpx4/script/analyze_swarm_bag" \
+run_python "$SRC_ROOT/fsmpx4/script/analyze_swarm_bag" \
   "$BAG_DIR" \
   --output-dir "$ANALYSIS_DIR" \
   --storage-id "$STORAGE_ID"
@@ -172,15 +173,15 @@ echo
 echo "[2/2] Generating plots"
 case "$PROFILE" in
   full)
-    run_python "$REPO_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile full --window "$WINDOW"
+    run_python "$SRC_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile full --window "$WINDOW"
     ;;
   paper)
-    run_python "$REPO_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile paper --window "$WINDOW"
+    run_python "$SRC_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile paper --window "$WINDOW"
     ;;
   both)
-    run_python "$REPO_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile full --window "$WINDOW"
+    run_python "$SRC_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile full --window "$WINDOW"
     echo
-    run_python "$REPO_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile paper --window "$WINDOW"
+    run_python "$SRC_ROOT/generate_plots.py" "$ANALYSIS_DIR" --profile paper --window "$WINDOW"
     ;;
 esac
 

@@ -36,7 +36,9 @@
     "vehicle_command.source_component_id": 1
 
     # 推力映射参数
-    "thr_map.hover_percentage": 0.71
+    # 实测 AUTO_HOVER 稳定悬停推力 ≈ 0.70（t≈49.7s vel_z≈0 时 thrust=-0.714）
+    # 配置须与实际悬停推力一致；偏高则持续上爬，偏低则缓慢下沉（下沉可被 Z 积分补偿，上爬无法补偿）
+    "thr_map.hover_percentage": 0.70
 
     # 控制器参数 - 位置控制增益
     "control.Kp_x": 2.5
@@ -70,54 +72,29 @@
     "swarm.payload_global_position_topic": "/px4_4/fmu/out/vehicle_global_position"
     "swarm.payload_local_position_topic": "/px4_4/fmu/out/vehicle_local_position"
     "swarm.data_timeout_s": 0.5
-    "swarm.rope_length_m": 1.15 # 实际绳长（米）
-    "swarm.rope_taut_fraction": 0.87 # 1.0m / 1.15m ≈ 0.87，达到此距离视为绷紧
-    "swarm.h_u_m": 0.9
-    "swarm.spring_k": 3.0
-    "swarm.damping_c1": 2.3
-    "swarm.friction_c2": 0.8 # [FIX-P4] 增大绝对速度摩擦，加强全局耗散
-    "swarm.vel_pid_kp": 2.0
-    "swarm.vel_pid_ki": 0.0 # 先关掉内环积分，避免与 payload 外环积分叠加形成慢振荡
-    "swarm.vel_pid_kd": 0.5
-    "swarm.payload_kp": 2.0
-    "swarm.payload_ki": 0.025 # 仅作用于 Z 轴积分（代码已修改），消除重力引起的高度静差；X/Y 不积分，避免水平振荡
-    "swarm.acc_norm_limit_m_s2": 6.0
-    "swarm.integral_limit": 2.0
-    "swarm.payload_integral_limit": 1.0
-    "swarm.payload_error_limit_xy_m": 0.5 # [FIX-P1] 恢复：初始冲击限 v_desired ≤ 0.6m/s（之前 0.0 = 全开，导致 1.93m/s 冲击）
-    "swarm.payload_error_limit_z_m": 0.5
+    "swarm.rope_length_m": 1.35 # 实测中心距（机体中心→payload中心）≈1.35m；物理绳长≈1.15m+挂点偏置≈0.20m
+    "swarm.rope_taut_fraction": 0.74 # 1.0m / 1.35m ≈ 0.74，达到此距离视为绷紧
+    "swarm.h_u_m": 0.9 # 虚拟弹簧设计高度，须 < 启动时实际 dz（≈0.9m），保证 beta>1 且弹簧方向正确；Z 轴稳态误差靠 payload_ki 积分消除
+    "swarm.structure_reference.side_length_m": 1.10 # 真实三机等边三角参考边长；虚拟节点参考矩阵由 side_length+h_u 自动生成
+    "swarm.spring_k": 2.0 # spring_k=4.0 时进入 FORM_HOLD 瞬间产生 2.6 m/s² spike，配合错误 hover 基准直接导致上飞；维持 2.0
+    "swarm.spring_force_clamp": 1.0 # [FIX-P5] 1.5→1.0 更紧的力钳制，限制大摆角时的弹簧冲击
+    "swarm.damping_c1": 0.9 # [FIX-P5] 0.9→1.2 增大相对速度阻尼，抑制节点间振荡
+    
+    "swarm.friction_c2": 0.4 # [FIX-P5] 0.2→0.4 增大绝对速度摩擦，全局耗散翻倍
+    "swarm.vel_pid_kp": 1.4 # [FIX-P5] 2.0→1.2 降低内环带宽，远离摆振频率(2.7 rad/s)
+    "swarm.vel_pid_ki": 0.02 # [FIX-P5] 0.05→0.02 大幅减小积分，防止windup导致反弹
+    "swarm.vel_pid_kd": 0.3 # [FIX-P5] 0.2→0.3 增大微分阻尼，抑制速度振荡
+    "swarm.payload_kp": 1.2 # [FIX-P5] 2.5→1.2 外环带宽大幅降低：ω_outer≈0.6 rad/s ≪ ω_pendulum=2.7
+    "swarm.payload_ki": 0.15 # [FIX-P5] 0.1→0.15 增大积分消除Z静差(实测-0.135m)
+    "swarm.acc_norm_limit_m_s2": 3.0 # [FIX-P5] 4.0→3.0 降低最大加速度，减少激进机动
+    "swarm.integral_limit": 1.0 # [FIX-P5] 2.0→1.0 收紧速度积分限幅，减少windup储能
+    "swarm.payload_integral_limit": 4.0
+    "swarm.max_payload_velocity": 0.5 # [FIX-P5] 新增：期望速度限幅，防止大误差→高速→超调的正反馈
+    "swarm.payload_error_limit_xy_m": 0.3 # [FIX-P5] 0.5→0.3 更紧的位置误差钳制
+    "swarm.payload_error_limit_z_m": 0.8 # [FIX-P5] 5.0→0.8 Z轴也必须限制！旧值形同虚设导致Z轴2.66m/s冲击
 
-    # 编队收敛门控参数（配合 CMD_CTRL 两阶段逻辑，代码待实现）
+    # 编队收敛门控参数：按真实 4 节点距离矩阵（3 UAV + payload）误差判断是否可切入 PAYLOAD_TRACK
+    # 其中 UAV-UAV 走结构参考边长，UAV-payload 走 rope_length_m。
     "swarm.formation_gate.enabled": true
-    "swarm.formation_gate.beta_min": 0.90 # 所有绳子绷紧到设计高度 90%
-    "swarm.formation_gate.struct_err_max": 0.0 # UAV-anchor 距离误差 ≤ 20%
-    "swarm.formation_gate.hold_duration_s": 2.0 # 连续满足后再等 1s 才切换
-    # h_u=0.9m, 等边三角形 s=1.10m, 外接圆r=0.64m, UAV-payload斜距=1.10m
-    "swarm.structure_reference.rest_lengths":
-      [
-        0.00,
-        1.10,
-        1.10,
-        0.64,
-        1.10,
-        1.10,
-        0.00,
-        1.10,
-        0.64,
-        1.10,
-        1.10,
-        1.10,
-        0.00,
-        0.64,
-        1.10,
-        0.64,
-        0.64,
-        0.64,
-        0.00,
-        0.90,
-        1.10,
-        1.10,
-        1.10,
-        0.90,
-        0.00,
-      ]
+    "swarm.formation_gate.struct_err_max": 0.3 # 6 条真实边的最大相对误差 ≤ 20%
+    "swarm.formation_gate.hold_duration_s": 1.0 # 连续满足后再保持 2s 才切换
