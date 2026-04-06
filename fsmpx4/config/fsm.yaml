@@ -79,7 +79,6 @@
     "swarm.spring_k": 2.0 # spring_k=4.0 时进入 FORM_HOLD 瞬间产生 2.6 m/s² spike，配合错误 hover 基准直接导致上飞；维持 2.0
     "swarm.spring_force_clamp": 1.0 # [FIX-P5] 1.5→1.0 更紧的力钳制，限制大摆角时的弹簧冲击
     "swarm.damping_c1": 0.9 # [FIX-P5] 0.9→1.2 增大相对速度阻尼，抑制节点间振荡
-    
     "swarm.friction_c2": 0.4 # [FIX-P5] 0.2→0.4 增大绝对速度摩擦，全局耗散翻倍
     "swarm.vel_pid_kp": 1.4 # [FIX-P5] 2.0→1.2 降低内环带宽，远离摆振频率(2.7 rad/s)
     "swarm.vel_pid_ki": 0.02 # [FIX-P5] 0.05→0.02 大幅减小积分，防止windup导致反弹
@@ -96,5 +95,5 @@
     # 编队收敛门控参数：按真实 4 节点距离矩阵（3 UAV + payload）误差判断是否可切入 PAYLOAD_TRACK
     # 其中 UAV-UAV 走结构参考边长，UAV-payload 走 rope_length_m。
     "swarm.formation_gate.enabled": true
-    "swarm.formation_gate.struct_err_max": 0.3 # 6 条真实边的最大相对误差 ≤ 20%
-    "swarm.formation_gate.hold_duration_s": 1.0 # 连续满足后再保持 2s 才切换
+    "swarm.formation_gate.struct_err_max": 0.20 # 6 条真实边的最大相对误差 ≤ 20%
+    "swarm.formation_gate.hold_duration_s": 1.0 # 连续满足后再保持 1s 才切换

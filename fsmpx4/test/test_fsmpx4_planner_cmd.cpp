@@ -159,7 +159,7 @@ px4_msgs::msg::VehicleAttitudeSetpoint makeExpectedPlannerOutput()
     input.payload_position_ned = swarm_planner::geo::lla_to_ned(
         kPayloadLatDeg, kPayloadLonDeg, kPayloadAltM, origin);
     input.payload_velocity_ned = swarm_planner::Vector3(kPayloadVx, kPayloadVy, kPayloadVz);
-    input.payload_target_ned = swarm_planner::Vector3(0.0, 0.0, -1.0);
+    input.payload_target_ned = input.payload_position_ned;
     input.self_index = 0;
     input.mass = 2.0;
 
@@ -577,5 +577,5 @@ TEST_F(FSMPX4PlannerCmdTest, FormationGateRequiresRealPayloadGeometryToConverge)
     EXPECT_EQ(swarm_debug.cmd_phase_name, "FORM_HOLD");
     EXPECT_NEAR(swarm_debug.payload_target_ned.x, payload_position_ned.x(), 1.0e-3);
     EXPECT_NEAR(swarm_debug.payload_target_ned.y, payload_position_ned.y(), 1.0e-3);
-    EXPECT_NEAR(swarm_debug.payload_target_ned.z, payload_position_ned.z() - 0.1, 1.0e-3);
+    EXPECT_NEAR(swarm_debug.payload_target_ned.z, payload_position_ned.z(), 1.0e-3);
 }

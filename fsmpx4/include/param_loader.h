@@ -89,7 +89,7 @@ struct FSMParams
         double rope_taut_fraction;
         swarm_planner::control::SwarmPlannerCore::Config core;
 
-        /// 编队收敛门控：进入 PAYLOAD_TRACK 前先让弹簧网络收敛
+        /// 编队收敛门控：进入 PAYLOAD_TRACK 前先让编队结构收敛
         struct FormationGate {
             bool   enabled{true};
             double struct_err_max{0.20};  ///< 真实距离矩阵相对误差上限（UAV-UAV + UAV-payload）

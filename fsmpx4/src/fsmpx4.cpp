@@ -7,11 +7,6 @@
 
 namespace fsmpx4
 {
-namespace
-{
-constexpr double kFormHoldHeightOffsetM = 0.1;
-}  // namespace
-
 //==============================================================================
 // Constructor
 //==============================================================================
@@ -545,8 +540,7 @@ void FSMPX4::executeState(const rclcpp::Time& now)
         }
 
         // ── 编队收敛门控 ────────────────────────────────────────────────────
-        // Phase 0 (FORM_HOLD): 锁定进入 CMD_CTRL 时的 payload 位置作为目标，
-        //   并在 NED z 方向上额外抬高 0.1m，避免目标跟着当前载荷持续刷新。
+        // Phase 0 (FORM_HOLD): 锁定进入 CMD_CTRL 时的 payload 位置作为目标。
         // Phase 1 (PAYLOAD_TRACK): 使用真实任务目标（input 不变）
         if (cmd_ctx_.phase == CmdPhase::FORM_HOLD)
         {
@@ -633,9 +627,8 @@ void FSMPX4::enterState(State next_state)
             cmd_ctx_.form_hold_target_ned = swarm_state_.load.value.pos;
             RCLCPP_INFO(
                 get_logger(),
-                "CMD_CTRL: lock FORM_HOLD target to payload entry pose with %.2fm upward offset: "
+                "CMD_CTRL: lock FORM_HOLD target to payload entry pose: "
                 "(%.2f, %.2f, %.2f)",
-                kFormHoldHeightOffsetM,
                 cmd_ctx_.form_hold_target_ned.x(),
                 cmd_ctx_.form_hold_target_ned.y(),
                 cmd_ctx_.form_hold_target_ned.z());
@@ -727,7 +720,7 @@ bool FSMPX4::checkFormationQuality(
         cmd_ctx_.phase_ok_since = now_s;
         RCLCPP_INFO(
             get_logger(),
-            "[CMD_CTRL] Real UAV-payload distance matrix converged (max relative error %.3f), "
+            "[CMD_CTRL] Real 4-node distance gate converged (max relative error %.3f), "
             "holding for %.1f s before PAYLOAD_TRACK",
             max_relative_error,
             gate.hold_duration_s);

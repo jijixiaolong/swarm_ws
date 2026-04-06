@@ -17,6 +17,8 @@ public:
     // kNumUavs 与外层 swarm_planner::kNumUavs 保持一致，这里转为 int 以兼容 Eigen 模板。
     static constexpr int kNumUavs = static_cast<int>(swarm_planner::kNumUavs);
     static constexpr int kNumNodes = kNumUavs + 2;
+    static constexpr int kHubNodeIndex = kNumUavs;
+    static constexpr int kPayloadNodeIndex = kNumUavs + 1;
 
     struct Config
     {
@@ -89,12 +91,20 @@ public:
     const Config& config() const { return cfg_; }
 
 private:
-    using NodeVector = std::array<Vector3, kNumNodes>;
-
-    struct VirtualState
+    struct EquivalentUavNode
     {
-        NodeVector q{};
-        NodeVector qdot{};
+        Vector3 q{Vector3::Zero()};
+        Vector3 qdot{Vector3::Zero()};
+    };
+
+    struct EquivalentState
+    {
+        EquivalentUavNode self{};
+        Vector3 q_hub{Vector3::Zero()};
+        Vector3 qdot_hub{Vector3::Zero()};
+        Vector3 q_payload{Vector3::Zero()};
+        Vector3 qdot_payload{Vector3::Zero()};
+        std::array<double, kNumUavs> alpha{};
         std::array<double, kNumUavs> beta{};
     };
 
@@ -103,9 +113,24 @@ private:
     void resetRuntimeState();
     bool loadRestLengths();
     bool validateInput(const Input& input) const;
-    bool buildVirtualState(const Input& input, double h_u, VirtualState& state) const;
+    bool buildEquivalentState(
+        const Input& input,
+        int self_index,
+        double h_u,
+        EquivalentState& state) const;
+    EquivalentUavNode buildEquivalentUavNode(
+        const Input& input,
+        int uav_index,
+        const EquivalentState& state) const;
+    void populateVirtualDebugState(
+        const Input& input,
+        const EquivalentState& state,
+        DebugState& debug) const;
     Vector3 computeDesiredPayloadVelocity(const Input& input, double dt);
-    Vector3 computePassiveNetworkForce(int self_index, const VirtualState& state) const;
+    Vector3 computePassiveNetworkForce(
+        int self_index,
+        const Input& input,
+        const EquivalentState& state) const;
     Vector3 computeTrackingInput(
         const Vector3& qdot_i,
         double dt,

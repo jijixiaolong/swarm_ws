@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 
 #include <gtest/gtest.h>
@@ -77,23 +78,24 @@ TEST(SwarmPlannerCoreTest, ResetPreservesConfiguredStructureReference)
     cfg.vel_pid_kd = 0.0;
     cfg.payload_kp = 0.0;
     cfg.payload_ki = 2.0;
+    cfg.payload_error_limit_z_m = 2.0;
     cfg.acc_norm_limit_m_s2 = 10.0;
     ASSERT_TRUE(core.initialize(cfg));
 
     auto input = makeInput();
-    input.payload_target_ned = swarm_planner::Vector3(1.0, 0.0, 0.0);
+    input.payload_target_ned = swarm_planner::Vector3(0.0, 0.0, 1.0);
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
-    const double first_accel_x = output.desired_acceleration.x();
+    const double first_accel_z = output.desired_acceleration.z();
     ASSERT_TRUE(core.compute(input, output));
-    const double second_accel_x = output.desired_acceleration.x();
+    const double second_accel_z = output.desired_acceleration.z();
 
     core.reset();
 
     EXPECT_TRUE(core.ready());
     ASSERT_TRUE(core.compute(input, output));
-    EXPECT_GT(second_accel_x, first_accel_x);
-    EXPECT_NEAR(output.desired_acceleration.x(), first_accel_x, 1e-6);
+    EXPECT_GT(second_accel_z, first_accel_z);
+    EXPECT_NEAR(output.desired_acceleration.z(), first_accel_z, 1e-6);
 }
 
 TEST(SwarmPlannerCoreTest, UsesConfiguredRestLengthsOverrideWhenProvided)
@@ -171,8 +173,13 @@ TEST(SwarmPlannerCoreTest, MappingScalesVirtualAccelerationByBeta)
 
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
+    swarm_planner::Vector3 limited_error = input.payload_position_ned - input.payload_target_ned;
+    limited_error.x() = std::clamp(
+        limited_error.x(), -cfg.payload_error_limit_xy_m, cfg.payload_error_limit_xy_m);
+    limited_error.y() = std::clamp(
+        limited_error.y(), -cfg.payload_error_limit_xy_m, cfg.payload_error_limit_xy_m);
     const swarm_planner::Vector3 desired_payload_velocity =
-        -cfg.payload_kp * (input.payload_position_ned - input.payload_target_ned);
+        -cfg.payload_kp * limited_error;
     const swarm_planner::Vector3 expected =
         output.debug.beta[0] * (cfg.vel_pid_kp * desired_payload_velocity / input.mass);
     EXPECT_NEAR(output.desired_acceleration.x(), expected.x(), 1e-6);
@@ -219,18 +226,19 @@ TEST(SwarmPlannerCoreTest, PayloadPositionIntegralBuildsDesiredAccelerationForSt
     cfg.vel_pid_kd = 0.0;
     cfg.payload_kp = 0.0;
     cfg.payload_ki = 2.0;
+    cfg.payload_error_limit_z_m = 2.0;
     cfg.acc_norm_limit_m_s2 = 10.0;
     ASSERT_TRUE(core.initialize(cfg));
 
     auto input = makeInput();
-    input.payload_target_ned = swarm_planner::Vector3(1.0, 0.0, 0.0);
+    input.payload_target_ned = swarm_planner::Vector3(0.0, 0.0, 1.0);
 
     swarm_planner::control::SwarmPlannerCore::Output output;
     ASSERT_TRUE(core.compute(input, output));
-    EXPECT_NEAR(output.desired_acceleration.x(), 0.005, 1e-6);
+    EXPECT_NEAR(output.desired_acceleration.x(), 0.0, 1e-6);
     EXPECT_NEAR(output.desired_acceleration.y(), 0.0, 1e-6);
-    EXPECT_NEAR(output.desired_acceleration.z(), 0.0, 1e-6);
+    EXPECT_NEAR(output.desired_acceleration.z(), 0.005, 1e-6);
 
     ASSERT_TRUE(core.compute(input, output));
-    EXPECT_NEAR(output.desired_acceleration.x(), 0.01, 1e-6);
+    EXPECT_NEAR(output.desired_acceleration.z(), 0.01, 1e-6);
 }

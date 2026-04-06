@@ -32,15 +32,45 @@ RestLengthMatrix buildEquilateralRestLengthMatrix(double side_length, double h_u
             }
         }
 
-        m(i, SwarmPlannerCore::kNumUavs) = radius;
-        m(SwarmPlannerCore::kNumUavs, i) = radius;
-        m(i, SwarmPlannerCore::kNumUavs + 1) = payload_distance;
-        m(SwarmPlannerCore::kNumUavs + 1, i) = payload_distance;
+        m(i, SwarmPlannerCore::kHubNodeIndex) = radius;
+        m(SwarmPlannerCore::kHubNodeIndex, i) = radius;
+        m(i, SwarmPlannerCore::kPayloadNodeIndex) = payload_distance;
+        m(SwarmPlannerCore::kPayloadNodeIndex, i) = payload_distance;
     }
 
-    m(SwarmPlannerCore::kNumUavs, SwarmPlannerCore::kNumUavs + 1) = h_u;
-    m(SwarmPlannerCore::kNumUavs + 1, SwarmPlannerCore::kNumUavs) = h_u;
+    m(SwarmPlannerCore::kHubNodeIndex, SwarmPlannerCore::kPayloadNodeIndex) = h_u;
+    m(SwarmPlannerCore::kPayloadNodeIndex, SwarmPlannerCore::kHubNodeIndex) = h_u;
     return m;
+}
+
+Vector3 computePassivePairContribution(
+    const Vector3& q_i,
+    const Vector3& qdot_i,
+    const Vector3& q_j,
+    const Vector3& qdot_j,
+    double rest_length,
+    double spring_k,
+    double damping_c1,
+    double spring_force_clamp)
+{
+    const Vector3 diff = q_i - q_j;
+    const double length = diff.norm();
+    if (length < 1e-6)
+    {
+        return Vector3::Zero();
+    }
+
+    Vector3 spring_force = spring_k * (1.0 - rest_length / length) * diff;
+    if (spring_force_clamp > 0.0)
+    {
+        const double magnitude = spring_force.norm();
+        if (magnitude > spring_force_clamp)
+        {
+            spring_force *= spring_force_clamp / magnitude;
+        }
+    }
+
+    return spring_force + damping_c1 * (qdot_i - qdot_j);
 }
 
 Vector3 computeVelocityErrorDerivative(
@@ -177,39 +207,68 @@ bool SwarmPlannerCore::validateInput(const Input& input) const
     return ready_ && input.self_index >= 0 && input.self_index < kNumUavs;
 }
 
-bool SwarmPlannerCore::buildVirtualState(
+bool SwarmPlannerCore::buildEquivalentState(
     const Input& input,
+    const int self_index,
     const double h_u,
-    VirtualState& state) const
+    EquivalentState& state) const
 {
-    // 虚拟网络节点布局：
-    //   0~(kNumUavs-1)  各 UAV 对应的虚拟点（投影到 payload 正上方 h_u 高度截面）
-    //   kNumUavs        payload 正上方 h_u 处的虚拟连接点
-    //   kNumUavs+1      payload 本体
-    state.q[kNumUavs + 1] = input.payload_position_ned;
-    state.qdot[kNumUavs + 1] = input.payload_velocity_ned;
-    state.q[kNumUavs] = input.payload_position_ned - Vector3(0.0, 0.0, h_u);
-    state.qdot[kNumUavs] = input.payload_velocity_ned;
+    state.q_payload = input.payload_position_ned;
+    state.qdot_payload = input.payload_velocity_ned;
+    state.q_hub = input.payload_position_ned - Vector3(0.0, 0.0, h_u);
+    state.qdot_hub = input.payload_velocity_ned;
 
     for (int i = 0; i < kNumUavs; ++i)
     {
         const double dz =
-            std::abs(input.payload_position_ned.z() - input.uav_positions_ned[i].z());
-
+            std::abs(input.payload_position_ned.z() - input.uav_positions_ned[static_cast<size_t>(i)].z());
         if (dz < 1e-4)
         {
             return false;
         }
 
-        const double alpha = h_u / dz;
-        state.beta[i] = dz / h_u;
-        state.q[i] = input.payload_position_ned +
-                     alpha * (input.uav_positions_ned[i] - input.payload_position_ned);
-        state.qdot[i] = input.payload_velocity_ned +
-                        alpha * (input.uav_velocities_ned[i] - input.payload_velocity_ned);
+        state.alpha[static_cast<size_t>(i)] = h_u / dz;
+        state.beta[static_cast<size_t>(i)] = dz / h_u;
     }
 
+    state.self = buildEquivalentUavNode(input, self_index, state);
     return true;
+}
+
+SwarmPlannerCore::EquivalentUavNode SwarmPlannerCore::buildEquivalentUavNode(
+    const Input& input,
+    const int uav_index,
+    const EquivalentState& state) const
+{
+    const size_t idx = static_cast<size_t>(uav_index);
+    const double alpha = state.alpha[idx];
+
+    EquivalentUavNode node;
+    node.q = input.payload_position_ned +
+             alpha * (input.uav_positions_ned[idx] - input.payload_position_ned);
+    node.qdot = input.payload_velocity_ned +
+                alpha * (input.uav_velocities_ned[idx] - input.payload_velocity_ned);
+    return node;
+}
+
+void SwarmPlannerCore::populateVirtualDebugState(
+    const Input& input,
+    const EquivalentState& state,
+    DebugState& debug) const
+{
+    for (int i = 0; i < kNumUavs; ++i)
+    {
+        const size_t idx = static_cast<size_t>(i);
+        const EquivalentUavNode node =
+            (i == debug.self_index) ? state.self : buildEquivalentUavNode(input, i, state);
+        debug.virtual_positions_ned[idx] = node.q;
+        debug.virtual_velocities_ned[idx] = node.qdot;
+    }
+
+    debug.virtual_positions_ned[static_cast<size_t>(kHubNodeIndex)] = state.q_hub;
+    debug.virtual_velocities_ned[static_cast<size_t>(kHubNodeIndex)] = state.qdot_hub;
+    debug.virtual_positions_ned[static_cast<size_t>(kPayloadNodeIndex)] = state.q_payload;
+    debug.virtual_velocities_ned[static_cast<size_t>(kPayloadNodeIndex)] = state.qdot_payload;
 }
 
 Vector3 SwarmPlannerCore::computeDesiredPayloadVelocity(
@@ -265,37 +324,52 @@ Vector3 SwarmPlannerCore::computeDesiredPayloadVelocity(
 
 Vector3 SwarmPlannerCore::computePassiveNetworkForce(
     const int self_index,
-    const VirtualState& state) const
+    const Input& input,
+    const EquivalentState& state) const
 {
-    const Vector3& q_i = state.q[self_index];
-    const Vector3& qdot_i = state.qdot[self_index];
+    const Vector3& q_i = state.self.q;
+    const Vector3& qdot_i = state.self.qdot;
 
-    // 弹簧：将节点对拉回参考结构长度；阻尼：抑制节点间相对速度；摩擦：耗散自身速度。
-    Vector3 spring_force = Vector3::Zero();
-    Vector3 damping_force = Vector3::Zero();
-    for (int j = 0; j < kNumNodes; ++j)
+    Vector3 passive_force = Vector3::Zero();
+    for (int j = 0; j < kNumUavs; ++j)
     {
         if (j == self_index)
         {
             continue;
         }
 
-        const Vector3 diff = q_i - state.q[j];
-        const double length = diff.norm();
-        Vector3 pair_spring = cfg_.spring_k * (1.0 - rest_lengths_(self_index, j) / length) * diff;
-        if (cfg_.spring_force_clamp > 0.0)
-        {
-            const double mag = pair_spring.norm();
-            if (mag > cfg_.spring_force_clamp)
-            {
-                pair_spring *= cfg_.spring_force_clamp / mag;
-            }
-        }
-        spring_force += pair_spring;
-        damping_force += cfg_.damping_c1 * (qdot_i - state.qdot[j]);
+        const EquivalentUavNode neighbor = buildEquivalentUavNode(input, j, state);
+        passive_force += computePassivePairContribution(
+            q_i,
+            qdot_i,
+            neighbor.q,
+            neighbor.qdot,
+            rest_lengths_(self_index, j),
+            cfg_.spring_k,
+            cfg_.damping_c1,
+            cfg_.spring_force_clamp);
     }
 
-    return spring_force + damping_force + cfg_.friction_c2 * qdot_i;
+    passive_force += computePassivePairContribution(
+        q_i,
+        qdot_i,
+        state.q_hub,
+        state.qdot_hub,
+        rest_lengths_(self_index, kHubNodeIndex),
+        cfg_.spring_k,
+        cfg_.damping_c1,
+        cfg_.spring_force_clamp);
+    passive_force += computePassivePairContribution(
+        q_i,
+        qdot_i,
+        state.q_payload,
+        state.qdot_payload,
+        rest_lengths_(self_index, kPayloadNodeIndex),
+        cfg_.spring_k,
+        cfg_.damping_c1,
+        cfg_.spring_force_clamp);
+
+    return passive_force + cfg_.friction_c2 * qdot_i;
 }
 
 Vector3 SwarmPlannerCore::computeTrackingInput(
@@ -335,22 +409,22 @@ bool SwarmPlannerCore::compute(const Input& input, Output& output)
 
     constexpr double dt = kFixedComputeDtS;
 
-    VirtualState state;
-    if (!buildVirtualState(input, cfg_.h_u_m, state))
+    const int self_index = input.self_index;
+    EquivalentState state;
+    if (!buildEquivalentState(input, self_index, cfg_.h_u_m, state))
     {
         return false;
     }
-    const int self_index = input.self_index;
     const double mass = input.mass;
 
-    const Vector3 passive_force = computePassiveNetworkForce(self_index, state);
+    const Vector3 passive_force = computePassiveNetworkForce(self_index, input, state);
     const Vector3 desired_payload_velocity = computeDesiredPayloadVelocity(input, dt);
     const Vector3 tracking_input =
-        computeTrackingInput(state.qdot[self_index], dt, desired_payload_velocity);
+        computeTrackingInput(state.self.qdot, dt, desired_payload_velocity);
 
     const Vector3 virtual_acceleration = -passive_force / mass + tracking_input / mass;
-    const Vector3 mapped_acceleration = state.beta[self_index] * virtual_acceleration;
-
+    const Vector3 mapped_acceleration =
+        state.beta[static_cast<size_t>(self_index)] * virtual_acceleration;
     const Vector3 desired_acceleration =
         clipNorm(mapped_acceleration, cfg_.acc_norm_limit_m_s2);
 
@@ -367,8 +441,6 @@ bool SwarmPlannerCore::compute(const Input& input, Output& output)
     dbg.payload_position_ned = input.payload_position_ned;
     dbg.payload_velocity_ned = input.payload_velocity_ned;
     dbg.payload_target_ned = input.payload_target_ned;
-    dbg.virtual_positions_ned = state.q;
-    dbg.virtual_velocities_ned = state.qdot;
     dbg.beta = state.beta;
     flattenRestLengths(rest_lengths_, dbg.rest_lengths);
     dbg.passive_force = passive_force;
@@ -380,6 +452,7 @@ bool SwarmPlannerCore::compute(const Input& input, Output& output)
     dbg.mass = input.mass;
     dbg.structure_locked = ready_;
     dbg.valid = true;
+    populateVirtualDebugState(input, state, dbg);
     return true;
 }
 
