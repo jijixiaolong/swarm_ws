@@ -52,7 +52,7 @@ struct LandCtx
 
 /// CMD_CTRL 内部子阶段
 enum class CmdPhase {
-    FORM_HOLD,      ///< 编队稳定期：payload_target = 当前位置，ki 不累积
+    FORM_HOLD,      ///< 编队稳定期：payload_target = 当前位置
     PAYLOAD_TRACK,  ///< 载荷跟踪期：payload_target = 真实任务目标
 };
 

@@ -110,8 +110,7 @@ def render_report(msg: SwarmPlannerDebug) -> str:
     lines = [
         (
             f"[swarm_debug] stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d} "
-            f"self={msg.self_index} valid={msg.valid} structure_locked={msg.structure_locked} "
-            f"dt={msg.dt_used:.4f}s"
+            f"self={msg.self_index} valid={msg.valid} structure_locked={msg.structure_locked}"
         ),
         (
             f"payload error={norm(payload_error):.3f} m "
@@ -153,7 +152,6 @@ def render_report(msg: SwarmPlannerDebug) -> str:
         real_horiz = norm_xy(real_rel)
         real_angle = math.degrees(math.atan2(real_horiz, abs(real_rel[2])))
         target_angle = math.degrees(math.atan2(rest_lengths[i][NODE_U], max(h_u, EPS)))
-
         q_to_u = dist(virtual_positions[i], virtual_positions[NODE_U])
         q_to_l = dist(virtual_positions[i], virtual_positions[NODE_L])
 

@@ -141,19 +141,16 @@ $$
 - $K_p,K_I,K_d$ 为虚拟节点速度 PID 内环增益（可取标量或对角矩阵）。
 - $u_i$ 为虚拟节点输入，$m_i$ 为第 $i$ 架 UAV 质量。
 
-## 4. 虚拟加速度映射到真实 UAV
+## 4. 真实节点直接加速度
 $$
-\beta_i=\frac{|z_l-z_i|}{|z_u-z_l|}=\frac{|z_l-z_i|}{h_u}
-$$
-
-$$
-a_{id,i}=\beta_i\,\ddot q_i
+\ddot p_i=\frac{-F_i+u_i}{m_i}
 $$
 
 其中：
-- $\beta_i$ 为第 $i$ 架 UAV 的虚实映射系数，对应实现中的 `state.beta[i]`。
-- $a_{id,i}$ 为真实系统中第 $i$ 架 UAV 的期望加速度，对应实现中的 `mapped_acceleration`。
-- 由于实现中使用竖直距离绝对值，映射比例只与高度差大小有关。
+- $F_i$ 为第 $i$ 架 UAV 在真实 `3 UAV + payload` 四节点网络上计算得到的被动力。
+- $u_i$ 为速度跟踪内环输出，对应实现中的 `tracking_input`。
+- $\ddot p_i$ 为直接作用到真实 UAV 的原始期望加速度，对应实现中的 `raw_acceleration`。
+- 最终控制指令为对 $\ddot p_i$ 做限幅后的 `desired_acceleration`。
 
 ## 5. CFO 轴向扰动观测器
 $$

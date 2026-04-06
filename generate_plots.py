@@ -328,11 +328,57 @@ def has_columns(df, *columns):
     return all(column in df.columns for column in columns)
 
 
+def planner_node_layout(dp):
+    if dp is None:
+        return None, 0
+    for prefix in ("virtual_positions_ned", "node_positions_ned"):
+        if not has_columns(dp, f"{prefix}[0].x", f"{prefix}[0].y", f"{prefix}[0].z"):
+            continue
+        count = 0
+        while has_columns(dp, f"{prefix}[{count}].x", f"{prefix}[{count}].y", f"{prefix}[{count}].z"):
+            count += 1
+        return prefix, count
+    return None, 0
+
+
+def planner_node_labels(prefix, node_count):
+    if prefix == "node_positions_ned" and node_count == 4:
+        return ["UAV-1", "UAV-2", "UAV-3", "Payload"]
+    if prefix == "virtual_positions_ned":
+        return [f"VP-{idx}" for idx in range(node_count)]
+    return [f"Node-{idx}" for idx in range(node_count)]
+
+
+def planner_rest_length_matrix(dp, node_count):
+    needed = [f"rest_lengths[{idx}]" for idx in range(node_count * node_count)]
+    if not has_columns(dp, *needed):
+        return None
+    return np.array(
+        [
+            [dp[f"rest_lengths[{row * node_count + col}]"].iloc[0] for col in range(node_count)]
+            for row in range(node_count)
+        ]
+    )
+
+
+def planner_rest_length_pairs(node_count):
+    if node_count == 4:
+        labels = ["1", "2", "3", "P"]
+    elif node_count == 5:
+        labels = ["1", "2", "3", "u", "l"]
+    else:
+        labels = [str(idx) for idx in range(node_count)]
+    return [((i, j), f"{labels[i]}↔{labels[j]}") for i in range(node_count) for j in range(i + 1, node_count)]
+
+
 def virtual_node_position(dp, node_idx):
+    prefix, node_count = planner_node_layout(dp)
+    if prefix is None or node_idx >= node_count:
+        raise KeyError(f"planner node {node_idx} not available")
     return (
-        dp[f"virtual_positions_ned[{node_idx}].x"].values,
-        dp[f"virtual_positions_ned[{node_idx}].y"].values,
-        dp[f"virtual_positions_ned[{node_idx}].z"].values,
+        dp[f"{prefix}[{node_idx}].x"].values,
+        dp[f"{prefix}[{node_idx}].y"].values,
+        dp[f"{prefix}[{node_idx}].z"].values,
     )
 
 
@@ -647,19 +693,41 @@ def plot_desired_acceleration():
 def plot_beta():
     print("[11] Beta coefficients")
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-
+    have_beta = False
     for uid in UAV_IDS:
         dp = load(f"px4_{uid}_swarm_planner_debug.csv")
-        if dp is None: continue
+        if dp is None or not has_columns(dp, "beta[0]", "beta[1]", "beta[2]"):
+            continue
+        have_beta = True
         for i, ax in enumerate(axes):
             ax.plot(dp["t"], dp[f"beta[{i}]"], color=UAV_COLORS[uid],
                     lw=1.2, label=UAV_LABELS[uid] if i == 0 else "")
 
-    for i, ax in enumerate(axes):
-        ax.set_ylabel(f"β[{i}]"); ax.grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9)
+    if have_beta:
+        for i, ax in enumerate(axes):
+            ax.set_ylabel(f"β[{i}]"); ax.grid(True, alpha=0.3)
+        add_legend_if_handles(axes[0], fontsize=9)
+        title = "Beta Coefficients (Force Allocation) vs Time"
+    else:
+        have_tracking_input = False
+        for uid in UAV_IDS:
+            dp = load(f"px4_{uid}_swarm_planner_debug.csv")
+            if dp is None or not has_columns(dp, "tracking_input.x", "tracking_input.y", "tracking_input.z"):
+                continue
+            have_tracking_input = True
+            axes[0].plot(dp["t"], dp["tracking_input.x"], color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
+            axes[1].plot(dp["t"], dp["tracking_input.y"], color=UAV_COLORS[uid], lw=1.2)
+            axes[2].plot(dp["t"], dp["tracking_input.z"], color=UAV_COLORS[uid], lw=1.2)
+        for ax, lbl in zip(axes, ["tracking_input.x", "tracking_input.y", "tracking_input.z"]):
+            ax.set_ylabel(lbl); ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.5)
+        if have_tracking_input:
+            add_legend_if_handles(axes[0], fontsize=9)
+        else:
+            axes[0].text(0.5, 0.5, "not available", ha='center', va='center',
+                         transform=axes[0].transAxes, fontsize=10)
+        title = "Tracking Input Components (beta not available)"
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Beta Coefficients (Force Allocation) vs Time", fontsize=14, fontweight='bold')
+    fig.suptitle(title, fontsize=14, fontweight='bold')
     fig.tight_layout()
     savefig(fig, "11_beta_coefficients.png")
 
@@ -670,48 +738,74 @@ def plot_virtual_positions():
     if dp is None:
         print("   no data, skipping")
         return
+    prefix, node_count = planner_node_layout(dp)
+    if prefix is None:
+        print("   no planner node positions, skipping")
+        return
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     cmaps = plt.cm.Set1.colors
-    for vi in range(5):
+    labels = planner_node_labels(prefix, node_count)
+    for vi in range(node_count):
         c = cmaps[vi % len(cmaps)]
-        axes[0].plot(dp["t"], dp[f"virtual_positions_ned[{vi}].x"],
-                     color=c, lw=1.2, label=f"VP-{vi}")
-        axes[1].plot(dp["t"], dp[f"virtual_positions_ned[{vi}].y"], color=c, lw=1.2)
-        axes[2].plot(dp["t"], dp[f"virtual_positions_ned[{vi}].z"], color=c, lw=1.2)
+        axes[0].plot(dp["t"], dp[f"{prefix}[{vi}].x"], color=c, lw=1.2, label=labels[vi])
+        axes[1].plot(dp["t"], dp[f"{prefix}[{vi}].y"], color=c, lw=1.2)
+        axes[2].plot(dp["t"], dp[f"{prefix}[{vi}].z"], color=c, lw=1.2)
 
     for ax, lbl in zip(axes, ["X (m)", "Y (m)", "Z (m)"]):
         ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9, ncol=5)
+    axes[0].legend(fontsize=9, ncol=min(node_count, 5))
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Virtual Formation Positions (NED) vs Time", fontsize=14, fontweight='bold')
+    title = "Virtual Formation Positions (NED) vs Time" if prefix == "virtual_positions_ned" \
+        else "Planner Node Positions (NED) vs Time"
+    fig.suptitle(title, fontsize=14, fontweight='bold')
     fig.tight_layout()
     savefig(fig, "12_virtual_positions.png")
 
 # ── 13. CFO / passive / virtual acceleration ─────────────────────────────────
 def plot_control_forces():
     print("[13] Control forces (CFO / passive / virtual)")
-    fig, axes = plt.subplots(3, 3, figsize=(16, 10), sharex=True)
+    candidates = [
+        ("passive_force", "Passive Force"),
+        ("tracking_input", "Tracking Input"),
+        ("raw_acceleration", "Raw Accel"),
+        ("desired_acceleration", "Desired Accel"),
+        ("virtual_acceleration", "Virtual Accel"),
+        ("cfo_acceleration", "CFO Accel"),
+    ]
+    available = []
+    for key, label in candidates:
+        if any(
+            (dp := load(f"px4_{uid}_swarm_planner_debug.csv")) is not None and
+            has_columns(dp, f"{key}.x", f"{key}.y", f"{key}.z")
+            for uid in UAV_IDS
+        ):
+            available.append((key, label))
+
+    if not available:
+        print("   no vector debug fields, skipping")
+        return
+
+    fig, axes = plt.subplots(len(available), len(UAV_IDS), figsize=(16, 3.0 * len(available) + 1.5), sharex=True)
+    axes = np.asarray(axes, dtype=object)
+    if axes.ndim == 1:
+        axes = axes[np.newaxis, :]
 
     for col, uid in enumerate(UAV_IDS):
         dp = load(f"px4_{uid}_swarm_planner_debug.csv")
         if dp is None: continue
 
-        for row, (key, color) in enumerate([
-            ("passive_force",       "#E74C3C"),
-            ("virtual_acceleration","#2ECC71"),
-            ("cfo_acceleration",    "#3498DB"),
-        ]):
+        for row, (key, label) in enumerate(available):
             ax = axes[row, col]
             if not has_columns(dp, f"{key}.x", f"{key}.y", f"{key}.z"):
                 ax.text(0.5, 0.5, "not available", ha='center', va='center',
                         transform=ax.transAxes, fontsize=9)
                 ax.grid(True, alpha=0.3)
                 if col == 0:
-                    ax.set_ylabel(key.replace('_', '\n'), fontsize=8)
+                    ax.set_ylabel(label.replace(' ', '\n'), fontsize=8)
                 if row == 0:
                     ax.set_title(UAV_LABELS[uid], fontweight='bold')
-                if row == 2:
+                if row == len(available) - 1:
                     ax.set_xlabel("Time (s)")
                 continue
             ax.plot(dp["t"], dp[f"{key}.x"], color='#E74C3C', lw=1.0, label='x')
@@ -719,14 +813,14 @@ def plot_control_forces():
             ax.plot(dp["t"], dp[f"{key}.z"], color='#3498DB', lw=1.0, label='z')
             ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.5)
             if col == 0:
-                ax.set_ylabel(key.replace('_', '\n'), fontsize=8)
+                ax.set_ylabel(label.replace(' ', '\n'), fontsize=8)
             if row == 0:
                 ax.set_title(UAV_LABELS[uid], fontweight='bold')
-            if row == 2:
+            if row == len(available) - 1:
                 ax.set_xlabel("Time (s)")
 
-    axes[0, 0].legend(fontsize=8)
-    fig.suptitle("Control Forces: Passive / Virtual / CFO Acceleration",
+    add_legend_if_handles(axes[0, 0], fontsize=8)
+    fig.suptitle("Planner Force / Acceleration Components",
                  fontsize=14, fontweight='bold')
     fig.tight_layout()
     savefig(fig, "13_control_forces.png")
@@ -775,6 +869,8 @@ def plot_formation_snapshots():
     if dp is None:
         print("   no data, skipping")
         return
+    prefix, node_count = planner_node_layout(dp)
+    show_virtual_nodes = prefix == "virtual_positions_ned"
 
     t_total = dp["t"].max()
     snap_times = np.linspace(0.1 * t_total, 0.9 * t_total, 6)
@@ -799,11 +895,11 @@ def plot_formation_snapshots():
         tx = row["payload_target_ned.x"]
         ty = row["payload_target_ned.y"]
         ax.scatter(tx, ty, color='purple', s=100, marker='*', zorder=5, label="Target")
-        # Virtual positions
-        for vi in range(5):
-            vx = row[f"virtual_positions_ned[{vi}].x"]
-            vy = row[f"virtual_positions_ned[{vi}].y"]
-            ax.scatter(vx, vy, color='gray', s=40, marker='^', alpha=0.6, zorder=4)
+        if show_virtual_nodes:
+            for vi in range(node_count):
+                vx = row[f"{prefix}[{vi}].x"]
+                vy = row[f"{prefix}[{vi}].y"]
+                ax.scatter(vx, vy, color='gray', s=40, marker='^', alpha=0.6, zorder=4)
 
         ax.set_title(f"t = {ts:.1f} s", fontsize=10)
         ax.grid(True, alpha=0.3); ax.set_aspect('equal')
@@ -870,6 +966,14 @@ def plot_uav_virtual_error():
     if dp is None:
         print("   no data, skipping")
         return
+    if not has_columns(
+        dp,
+        "virtual_positions_ned[0].x",
+        "virtual_positions_ned[0].y",
+        "virtual_positions_ned[0].z",
+    ):
+        print("   virtual projection data not available, skipping")
+        return
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
 
@@ -899,27 +1003,23 @@ def plot_formation_rest_length_error():
     if dp is None:
         print("   no data, skipping")
         return
-
-    needed = [f"rest_lengths[{i}]" for i in range(25)]
-    for i in range(5):
-        for c in ["x", "y", "z"]:
-            needed.append(f"virtual_positions_ned[{i}].{c}")
-    if not has_columns(dp, *needed):
-        print("   missing columns, skipping")
+    prefix, node_count = planner_node_layout(dp)
+    if prefix is None:
+        print("   planner node positions not available, skipping")
+        return
+    rl = planner_rest_length_matrix(dp, node_count)
+    if rl is None:
+        print("   missing rest-length matrix, skipping")
         return
 
-    # Build 5x5 rest_lengths (row-major)
-    rl = np.array([[dp[f"rest_lengths[{i*5+j}]"].iloc[0] for j in range(5)] for i in range(5)])
-
-    pairs = [(0, 1), (0, 2), (1, 2), (0, 3), (0, 4), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]
-    labels = ["1↔2", "1↔3", "2↔3", "1↔u", "1↔l", "2↔u", "2↔l", "3↔u", "3↔l", "u↔l"]
+    pair_defs = planner_rest_length_pairs(node_count)
     colors = ['#8E44AD', '#16A085', '#D35400', '#E74C3C', '#2ECC71', '#3498DB',
               '#F39C12', '#1ABC9C', '#9B59B6', '#95A5A6']
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
     ax_err, ax_abs = axes
 
-    for (i, j), lbl, col in zip(pairs, labels, colors):
+    for ((i, j), lbl), col in zip(pair_defs, colors):
         ref = rl[i, j]
         if ref <= 0:
             continue
@@ -935,7 +1035,9 @@ def plot_formation_rest_length_error():
     ax_err.grid(True, alpha=0.3)
     ax_abs.set_ylabel("|Δ| (m)"); ax_abs.set_xlabel("Time (s)")
     ax_abs.grid(True, alpha=0.3)
-    fig.suptitle("Virtual-Node Rest-Length Error (planner.yaml structure_reference.rest_lengths)",
+    title = "Virtual-Node Rest-Length Error" if prefix == "virtual_positions_ned" \
+        else "Planner Node Rest-Length Error"
+    fig.suptitle(title,
                  fontsize=14, fontweight='bold')
     fig.tight_layout()
     savefig(fig, "18b_formation_rest_length_error.png")
@@ -1054,9 +1156,22 @@ def plot_dashboard():
     # beta
     ax_beta = fig.add_subplot(gs[1, 0])
     if dp is not None:
-        for i, col in enumerate(['#E74C3C', '#2ECC71', '#3498DB']):
-            ax_beta.plot(dp["t"], dp[f"beta[{i}]"], color=col, lw=1.0, label=f"β[{i}]")
-    ax_beta.set_title("Beta Coefficients"); ax_beta.legend(fontsize=7); ax_beta.grid(True, alpha=0.3)
+        if has_columns(dp, "beta[0]", "beta[1]", "beta[2]"):
+            for i, col in enumerate(['#E74C3C', '#2ECC71', '#3498DB']):
+                ax_beta.plot(dp["t"], dp[f"beta[{i}]"], color=col, lw=1.0, label=f"β[{i}]")
+            ax_beta.set_title("Beta Coefficients")
+        elif has_columns(dp, "tracking_input.x", "tracking_input.y", "tracking_input.z"):
+            ax_beta.plot(dp["t"], dp["tracking_input.x"], color='#E74C3C', lw=1.0, label='tx')
+            ax_beta.plot(dp["t"], dp["tracking_input.y"], color='#2ECC71', lw=1.0, label='ty')
+            ax_beta.plot(dp["t"], dp["tracking_input.z"], color='#3498DB', lw=1.0, label='tz')
+            ax_beta.axhline(0, color='k', lw=0.5)
+            ax_beta.set_title("Tracking Input")
+        else:
+            ax_beta.text(0.5, 0.5, "not available", ha='center', va='center',
+                         transform=ax_beta.transAxes, fontsize=9)
+            ax_beta.set_title("Legacy Beta / Tracking Input")
+    add_legend_if_handles(ax_beta, fontsize=7)
+    ax_beta.grid(True, alpha=0.3)
 
     # inter-UAV dist
     ax_dist = fig.add_subplot(gs[1, 1])
@@ -1087,12 +1202,24 @@ def plot_dashboard():
 
     # desired accel magnitude
     ax_acc = fig.add_subplot(gs[1, 3])
+    have_acc = False
     for uid in UAV_IDS:
         df = load(f"px4_{uid}_planner_desired_acceleration.csv")
-        if df is None: continue
-        mag = np.sqrt(df["vector.x"]**2 + df["vector.y"]**2 + df["vector.z"]**2)
+        if df is not None and has_columns(df, "vector.x", "vector.y", "vector.z"):
+            mag = np.sqrt(df["vector.x"]**2 + df["vector.y"]**2 + df["vector.z"]**2)
+            ax_acc.plot(df["t"], mag, color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
+            have_acc = True
+            continue
+        df = load(f"px4_{uid}_swarm_planner_debug.csv")
+        if df is None or not has_columns(df, "desired_acceleration.x", "desired_acceleration.y", "desired_acceleration.z"):
+            continue
+        mag = np.sqrt(df["desired_acceleration.x"]**2 + df["desired_acceleration.y"]**2 + df["desired_acceleration.z"]**2)
         ax_acc.plot(df["t"], mag, color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
+        have_acc = True
     ax_acc.set_title("|Desired Accel| (m/s²)")
+    if not have_acc:
+        ax_acc.text(0.5, 0.5, "not available", ha='center', va='center',
+                    transform=ax_acc.transAxes, fontsize=9)
     add_legend_if_handles(ax_acc, fontsize=7)
     ax_acc.grid(True, alpha=0.3)
 
@@ -1125,18 +1252,15 @@ def compute_rest_length_error_summary():
     dp = load("px4_1_swarm_planner_debug.csv")
     if dp is None:
         return None
-
-    needed = [f"rest_lengths[{i}]" for i in range(25)]
-    for i in range(5):
-        for c in ["x", "y", "z"]:
-            needed.append(f"virtual_positions_ned[{i}].{c}")
-    if not has_columns(dp, *needed):
+    prefix, node_count = planner_node_layout(dp)
+    if prefix is None:
+        return None
+    rl = planner_rest_length_matrix(dp, node_count)
+    if rl is None:
         return None
 
-    rl = np.array([[dp[f"rest_lengths[{i * 5 + j}]"].iloc[0] for j in range(5)] for i in range(5)])
-
     abs_errors = []
-    for i, j in [(0, 1), (0, 2), (1, 2), (0, 3), (0, 4), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]:
+    for (i, j), _ in planner_rest_length_pairs(node_count):
         ref = rl[i, j]
         if ref <= 0:
             continue

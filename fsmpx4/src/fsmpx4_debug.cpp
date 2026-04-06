@@ -108,7 +108,7 @@ void FSMPX4::publishSwarmDebugMessage(
 
     for (size_t i = 0; i < debug.rest_lengths.size(); ++i)
     {
-        msg.rest_lengths[i] = debug.rest_lengths[i];
+    msg.rest_lengths[i] = debug.rest_lengths[i];
     }
 
     msg.passive_force = fsmpx4::toVector3Msg(debug.passive_force);
