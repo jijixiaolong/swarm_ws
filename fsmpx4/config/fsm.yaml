@@ -73,7 +73,7 @@
     "swarm.rope_length_m": 1.15 # 实际绳长（米）
     "swarm.rope_taut_fraction": 0.87 # 1.0m / 1.15m ≈ 0.87，达到此距离视为绷紧
     "swarm.h_u_m": 0.9
-    "swarm.spring_k": 3.0
+    "swarm.spring_k": 2.6
     "swarm.damping_c1": 2.3
     "swarm.friction_c2": 0.8 # [FIX-P4] 增大绝对速度摩擦，加强全局耗散
     "swarm.vel_pid_kp": 2.0
@@ -81,7 +81,7 @@
     "swarm.vel_pid_kd": 0.5
     "swarm.payload_kp": 2.0
     "swarm.payload_ki": 0.025 # 仅作用于 Z 轴积分（代码已修改），消除重力引起的高度静差；X/Y 不积分，避免水平振荡
-    "swarm.acc_norm_limit_m_s2": 6.0
+    "swarm.acc_norm_limit_m_s2": 3.0
     "swarm.integral_limit": 2.0
     "swarm.payload_integral_limit": 1.0
     "swarm.payload_error_limit_xy_m": 0.5 # [FIX-P1] 恢复：初始冲击限 v_desired ≤ 0.6m/s（之前 0.0 = 全开，导致 1.93m/s 冲击）
@@ -90,7 +90,7 @@
     # 编队收敛门控参数（配合 CMD_CTRL 两阶段逻辑，代码待实现）
     "swarm.formation_gate.enabled": true
     "swarm.formation_gate.beta_min": 0.90 # 所有绳子绷紧到设计高度 90%
-    "swarm.formation_gate.struct_err_max": 0.0 # UAV-anchor 距离误差 ≤ 20%
+    "swarm.formation_gate.struct_err_max": 0.2 # UAV-anchor 距离误差 ≤ 20%
     "swarm.formation_gate.hold_duration_s": 2.0 # 连续满足后再等 1s 才切换
     # h_u=0.9m, 等边三角形 s=1.10m, 外接圆r=0.64m, UAV-payload斜距=1.10m
     "swarm.structure_reference.rest_lengths":

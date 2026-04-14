@@ -566,26 +566,17 @@ void FSMPX4::executeState(const rclcpp::Time& now)
 
         swarm_planner::control::SwarmPlannerCore::Input input;
         swarm_planner::control::SwarmPlannerCore::Output swarm_output;
-        std::string build_reason;
-        if (!buildSwarmInput(now, input, &build_reason))
+        if (!buildSwarmInput(now, input, nullptr))
         {
             RCLCPP_WARN_THROTTLE(
-                get_logger(),
-                *get_clock(),
-                1000,
-                "CMD_CTRL swarm input unavailable: %s",
-                build_reason.c_str());
+                get_logger(), *get_clock(), 1000, "CMD_CTRL swarm input unavailable");
             enterState(State::AUTO_HOVER);
             return;
         }
 
-        // ── 编队收敛门控 ────────────────────────────────────────────────────
-        // Phase 0 (FORM_HOLD): 用当前 payload 位置替换目标
-        //   → 外环位置误差 = 0 → payload_ki 不累积 → 弹簧网络自由收敛
-        // Phase 1 (PAYLOAD_TRACK): 使用真实任务目标（input 不变）
         if (cmd_ctx_.phase == CmdPhase::FORM_HOLD)
         {
-            input.payload_target_ned = swarm_state_.load.value.pos;
+            input.payload_target_ned = cmd_ctx_.form_hold_target_ned;
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 2000,
                 "[CMD_CTRL] FORM_HOLD: waiting for formation convergence "
@@ -659,10 +650,16 @@ void FSMPX4::enterState(State next_state)
             break;
         }
         case State::AUTO_HOVER:   hover_ctx_.reset();   break;
-        case State::AUTO_LAND:    land_ctx_.reset();     break;
+        case State::AUTO_LAND:    land_ctx_.reset();    break;
         case State::CMD_CTRL:
             swarm_core_.reset();
             cmd_ctx_.reset();
+            cmd_ctx_.form_hold_target_ned = swarm_state_.load.value.pos;
+            RCLCPP_INFO(get_logger(),
+                        "[CMD_CTRL] FORM_HOLD target locked at (%.2f, %.2f, %.2f)",
+                        cmd_ctx_.form_hold_target_ned.x(),
+                        cmd_ctx_.form_hold_target_ned.y(),
+                        cmd_ctx_.form_hold_target_ned.z());
             break;
         default: break;
     }

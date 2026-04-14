@@ -59,11 +59,13 @@ enum class CmdPhase {
 /// Per-state context: CMD_CTRL
 struct CmdCtx {
     CmdPhase phase{CmdPhase::FORM_HOLD};
-    double   phase_ok_since{-1.0};  ///< 编队质量首次达标的时间戳（秒），-1 表示未达标
+    double   phase_ok_since{-1.0};            ///< 编队质量首次达标的时间戳（秒），-1 表示未达标
+    types::Vector3 form_hold_target_ned{types::Vector3::Zero()};  ///< 进入 FORM_HOLD 时锁定的 payload 位置
 
     void reset() {
         phase = CmdPhase::FORM_HOLD;
         phase_ok_since = -1.0;
+        form_hold_target_ned = types::Vector3::Zero();
     }
 };
 
