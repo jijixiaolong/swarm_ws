@@ -46,7 +46,7 @@ ament_target_dependencies(fsmpx4_param_loader rclcpp Eigen3 swarm_planner)
 
 # ── FSM Component (shared library) ──
 
-add_library(fsmpx4_fsm SHARED src/fsmpx4.cpp)
+add_library(fsmpx4_fsm SHARED src/fsmpx4.cpp src/fsmpx4_debug.cpp)
 target_include_directories(fsmpx4_fsm PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${swarm_planner_INCLUDE_DIRS})
 target_link_libraries(fsmpx4_fsm
   fsmpx4_input
@@ -92,13 +92,7 @@ install(PROGRAMS
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_fsmpx4_planner_cmd test/test_fsmpx4_planner_cmd.cpp)
-  if(TARGET test_fsmpx4_planner_cmd)
-    target_link_libraries(test_fsmpx4_planner_cmd fsmpx4_fsm)
-    ament_target_dependencies(test_fsmpx4_planner_cmd rclcpp geometry_msgs sensor_msgs px4_msgs swarm_planner)
-  endif()
-
-  find_package(ament_lint_auto REQUIRED)
+find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()
 

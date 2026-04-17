@@ -19,7 +19,7 @@
     # 自动起飞参数（仅在 OFFBOARD_STABILIZED -> HOVER 入口时触发）
     "takeoff.enabled": true
     "takeoff.idle_duration_s": 1.0
-    "takeoff.target_height_m": 0.7
+    "takeoff.target_height_m": 1.5
     "takeoff.ascent_velocity_m_s": 0.6
     "takeoff.timeout_s": 10.0
 
@@ -45,9 +45,9 @@
     "control.Kv_x": 3.0
     "control.Kv_y": 3.0
     "control.Kv_z": 4.5
-    "control.Kvi_x": 0.02
-    "control.Kvi_y": 0.02
-    "control.Kvi_z": 0.1
+    "control.Kvi_x": 0.4
+    "control.Kvi_y": 0.4
+    "control.Kvi_z": 0.8
 
     # 控制器参数 - 物理参数
     "control.mass": 2.0
@@ -57,8 +57,9 @@
     "control.max_thrust": -0.1 # 最大推力 (向上)
     "control.min_thrust": -0.9 # 最小推力 (向下)
 
-    # 控制器参数 - 积分控制 (暂时关闭，先稳定基础控制)
-    "control.use_integral": false
+    # 控制器参数 - 积分控制
+    # 悬挂载荷会在 AUTO_HOVER 里给每架机带来稳定的内拉/下拉扰动；不开积分会出现明显静差，编队在切到 CMD_CTRL 前就先塌缩。
+    "control.use_integral": true
 
     # 编队规划参数
     "swarm.uav_namespaces": ["/px4_1", "/px4_2", "/px4_3"]
@@ -66,58 +67,44 @@
     "swarm.mass": 2.0
     "swarm.target_x_m": 1.0
     "swarm.target_y_m": 1.0
-    "swarm.target_z_m": -1.5
+    "swarm.target_z_m": -2.0
     "swarm.payload_global_position_topic": "/px4_4/fmu/out/vehicle_global_position"
     "swarm.payload_local_position_topic": "/px4_4/fmu/out/vehicle_local_position"
     "swarm.data_timeout_s": 0.5
-    "swarm.rope_length_m": 1.15 # 实际绳长（米）
-    "swarm.rope_taut_fraction": 0.87 # 1.0m / 1.15m ≈ 0.87，达到此距离视为绷紧
-    "swarm.h_u_m": 0.9
+    "swarm.h_u_m": 0.5 # 虚拟节点平面到 payload 的高度（自由设计参数，可独立调节）
     "swarm.spring_k": 2.6
-    "swarm.damping_c1": 2.3
-    "swarm.friction_c2": 0.8 # [FIX-P4] 增大绝对速度摩擦，加强全局耗散
+    "swarm.damping_c1": 0.6 # 20260417_204429 bag: 0.7Hz 极限环 ±0.18m，damping/spring=5%; 提至 0.6 (基线) 增阻尼
+    "swarm.friction_c2": 2.4 # iter3 试：skill 建议 +0.2 加耗散降振荡
     "swarm.vel_pid_kp": 2.0
-    "swarm.vel_pid_ki": 0.0 # 先关掉内环积分，避免与 payload 外环积分叠加形成慢振荡
-    "swarm.vel_pid_kd": 0.5
-    "swarm.payload_kp": 2.0
-    "swarm.payload_ki": 0.025 # 仅作用于 Z 轴积分（代码已修改），消除重力引起的高度静差；X/Y 不积分，避免水平振荡
+    "swarm.vel_pid_ki": 0.01 # 先关掉内环积分，避免与 payload 外环积分叠加形成慢振荡
+    "swarm.vel_pid_kd": 0.01
+    "swarm.payload_kp": 1.4 # 20260416 bag: 2.0 过于激进，激发 XY 发散振荡；降档打破正反馈回路
+    "swarm.payload_ki": 0.05 # 仅作用于 Z 轴积分；0.025 太弱，难以吃掉 CMD_CTRL 下的高度常值偏差
+    # XY 位置积分：20260417_164442 实飞证伪——加 ki=0.03 后稳态 |e| 4.4cm→18.7cm，
+    # ex 漂移率 1.15→8 mm/s 并在末段发散到 13.7m。绳摆动力学下 I 项引入相位滞后，
+    # 正反馈激发慢模态。代码路径保留，ki_xy=0 即纯 P 行为；要开启需先解决根因。
+    "swarm.payload_ki_xy": 0.00
+    "swarm.payload_i_err_deadband_xy_m": 0.02       # |e_xy|<2cm 时不积（噪声/极限环）
+    "swarm.payload_i_vel_deadband_xy_m_s": 0.15     # |v_payload_xy|>15cm/s 时不积（仍在摆动）
     "swarm.acc_norm_limit_m_s2": 3.0
     "swarm.integral_limit": 2.0
     "swarm.payload_integral_limit": 1.0
     "swarm.payload_error_limit_xy_m": 0.5 # [FIX-P1] 恢复：初始冲击限 v_desired ≤ 0.6m/s（之前 0.0 = 全开，导致 1.93m/s 冲击）
     "swarm.payload_error_limit_z_m": 0.5
-
-    # 编队收敛门控参数（配合 CMD_CTRL 两阶段逻辑，代码待实现）
+    "swarm.rope_tension_comp.enabled": false # 20260417_204429 bag: 观测器输出 ~2.5N 但补偿被关，z 静差 -0.13m
+    "swarm.rope_tension_comp.max_tension_n": 5.0 # 0 = 不裁剪；>0 时按单绳张力上限裁剪
+    "swarm.rope_tension_comp.observer_l1": 10.0 # CFO 速度通道校正增益
+    "swarm.rope_tension_comp.observer_l2": 10.0 # CFO 扰动通道校正增益
+    "swarm.rope_tension_comp.observer_phi": 0.3 # sat(e/phi) 的边界层宽度
+    "swarm.azimuth_hold.kp": 0.4 # 20260416 bag: azimuth_stab 出现明显振荡耦合，降低恢复力权重
+    "swarm.azimuth_hold.kd": 0.01 # 20260416 bag: 同步加大切向阻尼，避免自旋振荡驱动 payload XY 发散
+# 编队收敛门控参数：基于虚拟节点距离误差决定何时放行到 PAYLOAD_TRACK
     "swarm.formation_gate.enabled": true
-    "swarm.formation_gate.beta_min": 0.90 # 所有绳子绷紧到设计高度 90%
-    "swarm.formation_gate.struct_err_max": 0.2 # UAV-anchor 距离误差 ≤ 20%
+    "swarm.formation_gate.struct_err_max": 0.4 # 3 条虚拟 UAV-UAV 边距离相对误差 ≤ 20%
     "swarm.formation_gate.hold_duration_s": 2.0 # 连续满足后再等 1s 才切换
-    # h_u=0.9m, 等边三角形 s=1.10m, 外接圆r=0.64m, UAV-payload斜距=1.10m
-    "swarm.structure_reference.rest_lengths":
-      [
-        0.00,
-        1.10,
-        1.10,
-        0.64,
-        1.10,
-        1.10,
-        0.00,
-        1.10,
-        0.64,
-        1.10,
-        1.10,
-        1.10,
-        0.00,
-        0.64,
-        1.10,
-        0.64,
-        0.64,
-        0.64,
-        0.00,
-        0.90,
-        1.10,
-        1.10,
-        1.10,
-        0.90,
-        0.00,
-      ]
+    # 三棱锥编队几何（三个参数唯一确定虚拟弹簧参考长度矩阵，initialize() 时计算一次）：
+    #   dz_ref = √(rope² - (side/√3)²)   设计高度差
+    #   alpha  = h_u_m / dz_ref           虚拟空间缩放比
+    "swarm.structure_reference.uav_uav_distance_m": 1.8  # 等边三角形边长 (m)
+    "swarm.structure_reference.rope_length_m": 1.4        # 物理绳长 (m)，需满足 rope > side/√3
+

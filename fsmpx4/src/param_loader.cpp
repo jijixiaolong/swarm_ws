@@ -1,6 +1,8 @@
-#include <rclcpp/rclcpp.hpp>
 #include <algorithm>
+#include <cmath>
 #include <exception>
+
+#include <rclcpp/rclcpp.hpp>
 
 #include "param_loader.h"
 
@@ -27,6 +29,7 @@ double clampMin(const double value, const double lower_bound)
 {
     return std::max(value, lower_bound);
 }
+
 
 }  // namespace
 
@@ -82,8 +85,6 @@ FSMParams::FSMParams()
     swarm.payload_global_position_topic = "/px4_4/fmu/out/vehicle_global_position";
     swarm.payload_local_position_topic = "/px4_4/fmu/out/vehicle_local_position";
     swarm.data_timeout_s = 0.5;
-    swarm.rope_length_m = 1.0;
-    swarm.rope_taut_fraction = 0.85;
 }
 
 bool FSMParams::load_from_ros_node(const std::shared_ptr<rclcpp::Node>& node)
@@ -234,14 +235,7 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
         params.swarm.data_timeout_s = clampMin(
             node.declare_parameter<double>("swarm.data_timeout_s", params.swarm.data_timeout_s),
             0.01);
-        params.swarm.rope_length_m = clampMin(
-            node.declare_parameter<double>("swarm.rope_length_m", params.swarm.rope_length_m),
-            0.1);
-        params.swarm.rope_taut_fraction = std::clamp(
-            node.declare_parameter<double>("swarm.rope_taut_fraction", params.swarm.rope_taut_fraction),
-            0.5, 1.0);
-
-        params.swarm.core.h_u_m = clampMin(
+params.swarm.core.h_u_m = clampMin(
             node.declare_parameter<double>("swarm.h_u_m", params.swarm.core.h_u_m), 1e-6);
         params.swarm.core.spring_k = clampMin(
             node.declare_parameter<double>("swarm.spring_k", params.swarm.core.spring_k), 0.0);
@@ -259,6 +253,20 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
             node.declare_parameter<double>("swarm.payload_kp", params.swarm.core.payload_kp), 0.0);
         params.swarm.core.payload_ki = clampMin(
             node.declare_parameter<double>("swarm.payload_ki", params.swarm.core.payload_ki), 0.0);
+        params.swarm.core.payload_ki_xy = clampMin(
+            node.declare_parameter<double>(
+                "swarm.payload_ki_xy", params.swarm.core.payload_ki_xy),
+            0.0);
+        params.swarm.core.payload_i_err_deadband_xy_m = clampMin(
+            node.declare_parameter<double>(
+                "swarm.payload_i_err_deadband_xy_m",
+                params.swarm.core.payload_i_err_deadband_xy_m),
+            0.0);
+        params.swarm.core.payload_i_vel_deadband_xy_m_s = clampMin(
+            node.declare_parameter<double>(
+                "swarm.payload_i_vel_deadband_xy_m_s",
+                params.swarm.core.payload_i_vel_deadband_xy_m_s),
+            0.0);
         params.swarm.core.acc_norm_limit_m_s2 = clampMin(
             node.declare_parameter<double>(
                 "swarm.acc_norm_limit_m_s2", params.swarm.core.acc_norm_limit_m_s2),
@@ -278,16 +286,65 @@ bool load_params_from_node(rclcpp::Node& node, FSMParams& params)
             node.declare_parameter<double>(
                 "swarm.payload_error_limit_z_m", params.swarm.core.payload_error_limit_z_m),
             0.0);
+        params.swarm.core.rope_tension_compensation_enabled = node.declare_parameter<bool>(
+            "swarm.rope_tension_comp.enabled",
+            params.swarm.core.rope_tension_compensation_enabled);
+        params.swarm.core.rope_tension_max_n = clampMin(
+            node.declare_parameter<double>(
+                "swarm.rope_tension_comp.max_tension_n",
+                params.swarm.core.rope_tension_max_n),
+            0.0);
+        params.swarm.core.rope_observer_l1 = clampMin(
+            node.declare_parameter<double>(
+                "swarm.rope_tension_comp.observer_l1",
+                params.swarm.core.rope_observer_l1),
+            0.0);
+        params.swarm.core.rope_observer_l2 = clampMin(
+            node.declare_parameter<double>(
+                "swarm.rope_tension_comp.observer_l2",
+                params.swarm.core.rope_observer_l2),
+            0.0);
+        params.swarm.core.rope_observer_phi = clampMin(
+            node.declare_parameter<double>(
+                "swarm.rope_tension_comp.observer_phi",
+                params.swarm.core.rope_observer_phi),
+            0.0);
+        params.swarm.core.azimuth_hold_kp = clampMin(
+            node.declare_parameter<double>(
+                "swarm.azimuth_hold.kp",
+                params.swarm.core.azimuth_hold_kp),
+            0.0);
+        params.swarm.core.azimuth_hold_kd = clampMin(
+            node.declare_parameter<double>(
+                "swarm.azimuth_hold.kd",
+                params.swarm.core.azimuth_hold_kd),
+            0.0);
+        params.swarm.core.uav_uav_distance_m = clampMin(
+            node.declare_parameter<double>(
+                "swarm.structure_reference.uav_uav_distance_m",
+                params.swarm.core.uav_uav_distance_m),
+            0.0);
+        params.swarm.core.rope_length_m = clampMin(
+            node.declare_parameter<double>(
+                "swarm.structure_reference.rope_length_m",
+                params.swarm.core.rope_length_m),
+            0.0);
         params.swarm.core.rest_lengths_override = node.declare_parameter<std::vector<double>>(
             "swarm.structure_reference.rest_lengths", params.swarm.core.rest_lengths_override);
+        if (params.swarm.core.rope_length_m > 0.0 && params.swarm.core.uav_uav_distance_m > 0.0)
+        {
+            RCLCPP_INFO(
+                node.get_logger(),
+                "swarm.structure_reference: rope=%.3f m, uav_uav=%.3f m, h_u=%.3f m; "
+                "rest_lengths built once from design geometry.",
+                params.swarm.core.rope_length_m,
+                params.swarm.core.uav_uav_distance_m,
+                params.swarm.core.h_u_m);
+        }
 
         // ── 编队收敛门控 ──────────────────────────────────────────────────────
         params.swarm.formation_gate.enabled = node.declare_parameter<bool>(
             "swarm.formation_gate.enabled", params.swarm.formation_gate.enabled);
-        params.swarm.formation_gate.beta_min = std::clamp(
-            node.declare_parameter<double>(
-                "swarm.formation_gate.beta_min", params.swarm.formation_gate.beta_min),
-            0.0, 1.5);
         params.swarm.formation_gate.struct_err_max = clampMin(
             node.declare_parameter<double>(
                 "swarm.formation_gate.struct_err_max", params.swarm.formation_gate.struct_err_max),

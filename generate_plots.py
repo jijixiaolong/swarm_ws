@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive swarm flight data visualization script.
-Generates detailed plots from CSV data recorded during swarm operation.
+Swarm flight data visualization – focused on control forces, distances, and payload tracking.
 """
 
 import os
@@ -11,9 +10,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.collections import LineCollection
-from matplotlib.axes import Axes
 warnings.filterwarnings('ignore')
 warnings.filterwarnings('ignore', message='No artists with labels found to put in legend.*')
 from scipy.spatial.transform import Rotation
@@ -29,6 +25,7 @@ def _to_mpl_value(value):
 
 
 def _patch_axes_method(name):
+    from matplotlib.axes import Axes
     original = getattr(Axes, name)
 
     def wrapper(self, *args, **kwargs):
@@ -39,13 +36,9 @@ def _patch_axes_method(name):
     setattr(Axes, name, wrapper)
 
 
-# Pandas 2 no longer supports the legacy indexing path used by older Matplotlib.
-# Normalize Series/Index inputs at the plotting boundary so the existing code
-# keeps working without rewriting every plotting call.
 for _axes_method in ("plot", "scatter", "step", "fill_between"):
     _patch_axes_method(_axes_method)
 
-# Paths: set in main from command-line (analysis directory that contains csv/)
 CSV_DIR = None
 OUT_DIR = None
 GLOBAL_TIME_ORIGIN_S = None
@@ -57,6 +50,8 @@ UAV_IDS    = [1, 2, 3]
 UAV_COLORS = {1: "#E74C3C", 2: "#2ECC71", 3: "#3498DB"}
 UAV_LABELS = {1: "UAV-1", 2: "UAV-2", 3: "UAV-3"}
 PAYLOAD_COLOR = "#F39C12"
+
+XYZ_COLORS = ["#E74C3C", "#2ECC71", "#3498DB"]
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 def load(name):
@@ -81,7 +76,6 @@ def load(name):
 def detect_global_time_origin():
     if not CSV_DIR or not os.path.isdir(CSV_DIR):
         return None
-
     first_samples = []
     for name in sorted(os.listdir(CSV_DIR)):
         if not name.endswith(".csv"):
@@ -93,14 +87,12 @@ def detect_global_time_origin():
             continue
         if not df.empty:
             first_samples.append(float(df["_bag_time_s"].iloc[0]))
-
     return min(first_samples) if first_samples else None
 
 
 def detect_common_valid_start_bag_time():
     starts = []
     required_columns = ["_bag_time_s", "uav_position.x", "uav_position.y", "uav_position.z"]
-
     for uid in UAV_IDS:
         path = os.path.join(CSV_DIR, f"px4_{uid}_fsmpx4_fsm_debug.csv")
         if not os.path.exists(path):
@@ -117,14 +109,12 @@ def detect_common_valid_start_bag_time():
         valid_mask = position_mag > 1e-6
         if valid_mask.any():
             starts.append(float(df.loc[valid_mask, "_bag_time_s"].iloc[0]))
-
     return max(starts) if starts else None
 
 
 def detect_cmd_ctrl_start_bag_time():
     starts = []
     required_columns = ["_bag_time_s", "fsm_state_name"]
-
     for uid in UAV_IDS:
         path = os.path.join(CSV_DIR, f"px4_{uid}_fsmpx4_fsm_debug.csv")
         if not os.path.exists(path):
@@ -136,10 +126,8 @@ def detect_cmd_ctrl_start_bag_time():
         cmd_ctrl = df["fsm_state_name"] == "CMD_CTRL"
         if cmd_ctrl.any():
             starts.append(float(df.loc[cmd_ctrl, "_bag_time_s"].iloc[0]))
-
     if starts:
         return max(starts)
-
     planner_path = os.path.join(CSV_DIR, "px4_1_swarm_planner_debug.csv")
     if os.path.exists(planner_path):
         try:
@@ -148,66 +136,43 @@ def detect_cmd_ctrl_start_bag_time():
             return None
         if not df.empty:
             return float(df["_bag_time_s"].iloc[0])
-
     return None
 
 
 def configure_time_window(window_mode):
     global GLOBAL_TIME_ORIGIN_S, TIME_WINDOW_START_S, TIME_WINDOW_END_S
-
     GLOBAL_TIME_ORIGIN_S = detect_global_time_origin()
     TIME_WINDOW_START_S = 0.0
     TIME_WINDOW_END_S = None
-
     if GLOBAL_TIME_ORIGIN_S is None or window_mode == "full":
         return TIME_WINDOW_START_S
-
     detector = {
         "valid": detect_common_valid_start_bag_time,
         "cmd_ctrl": detect_cmd_ctrl_start_bag_time,
     }.get(window_mode)
-
     if detector is None:
         return TIME_WINDOW_START_S
-
     start_bag_time = detector()
     if start_bag_time is None and window_mode == "cmd_ctrl":
         start_bag_time = detect_common_valid_start_bag_time()
     if start_bag_time is not None:
         TIME_WINDOW_START_S = max(0.0, start_bag_time - GLOBAL_TIME_ORIGIN_S)
-
     return TIME_WINDOW_START_S
 
 
 def load_uav_kinematics(uid):
-    """Prefer FSM debug because its UAV pose is already expressed in a shared NED frame."""
     df = load(f"px4_{uid}_fsmpx4_fsm_debug.csv")
     if df is not None and has_columns(
         df,
-        "uav_position.x",
-        "uav_position.y",
-        "uav_position.z",
-        "uav_velocity.x",
-        "uav_velocity.y",
-        "uav_velocity.z",
+        "uav_position.x", "uav_position.y", "uav_position.z",
+        "uav_velocity.x", "uav_velocity.y", "uav_velocity.z",
     ):
-        return df.rename(
-            columns={
-                "uav_position.x": "x",
-                "uav_position.y": "y",
-                "uav_position.z": "z",
-                "uav_velocity.x": "vx",
-                "uav_velocity.y": "vy",
-                "uav_velocity.z": "vz",
-            }
-        )
+        return df.rename(columns={
+            "uav_position.x": "x", "uav_position.y": "y", "uav_position.z": "z",
+            "uav_velocity.x": "vx", "uav_velocity.y": "vy", "uav_velocity.z": "vz",
+        })
     return load(f"px4_{uid}_fmu_out_vehicle_local_position.csv")
 
-def quat_to_euler(q0, q1, q2, q3):
-    """Convert quaternion [w,x,y,z] to Euler angles [roll,pitch,yaw] in degrees."""
-    r = Rotation.from_quat(np.column_stack([q1, q2, q3, q0]))  # scipy: [x,y,z,w]
-    angles = r.as_euler('xyz', degrees=True)
-    return angles[:, 0], angles[:, 1], angles[:, 2]
 
 def savefig(fig, name, dpi=150):
     path = os.path.join(OUT_DIR, name)
@@ -228,12 +193,6 @@ def virtual_node_position(dp, node_idx):
     )
 
 
-def add_legend_if_handles(ax, *args, **kwargs):
-    handles, labels = ax.get_legend_handles_labels()
-    if handles and any(label and not label.startswith("_") for label in labels):
-        ax.legend(*args, **kwargs)
-
-
 def clear_png_outputs():
     if not OUT_DIR or not os.path.isdir(OUT_DIR):
         return
@@ -241,849 +200,101 @@ def clear_png_outputs():
         if name.endswith(".png"):
             os.unlink(os.path.join(OUT_DIR, name))
 
-def colored_line(ax, x, y, c, cmap='viridis', lw=1.5, **kw):
-    """Draw a line colored by parameter c."""
-    points = np.array([x, y]).T.reshape(-1, 1, 2)
-    segs   = np.concatenate([points[:-1], points[1:]], axis=1)
-    lc = LineCollection(segs, cmap=cmap, linewidth=lw, **kw)
-    lc.set_array(c)
-    ax.add_collection(lc)
-    return lc
 
-# ── 1. 3-projection trajectory (XY / XZ / YZ) ────────────────────────────────
-def plot_3d_trajectory():
-    print("[1] 3-projection trajectories (XY / XZ / YZ)")
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+def _plot_xyz_force(ax, dp, key, label=None):
+    """Plot x/y/z components of a vector field on ax. Returns True if data found."""
+    if not has_columns(dp, f"{key}.x", f"{key}.y", f"{key}.z"):
+        ax.text(0.5, 0.5, "n/a", ha='center', va='center',
+                transform=ax.transAxes, fontsize=8, color='gray')
+        ax.grid(True, alpha=0.3)
+        return False
+    for comp, col in zip(["x", "y", "z"], XYZ_COLORS):
+        ax.plot(dp["t"], dp[f"{key}.{comp}"], color=col, lw=1.0,
+                label=comp if label is None else None)
+    ax.axhline(0, color='k', lw=0.4, ls='--')
+    ax.grid(True, alpha=0.3)
+    return True
 
-    def _scatter_ends(ax, x, y, color):
-        ax.scatter(x.iloc[0],  y.iloc[0],  color=color, marker='o', s=70, zorder=6)
-        ax.scatter(x.iloc[-1], y.iloc[-1], color=color, marker='*', s=130, zorder=6)
 
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        c = UAV_COLORS[uid]; lbl = UAV_LABELS[uid]
-        axes[0].plot(df["x"],  df["y"],  color=c, lw=1.3, label=lbl)
-        axes[1].plot(df["x"], -df["z"],  color=c, lw=1.3)
-        axes[2].plot(df["y"], -df["z"],  color=c, lw=1.3)
-        _scatter_ends(axes[0], df["x"], df["y"],   c)
-        _scatter_ends(axes[1], df["x"], -df["z"],  c)
-        _scatter_ends(axes[2], df["y"], -df["z"],  c)
-
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        px = dp["payload_position_ned.x"]
-        py = dp["payload_position_ned.y"]
-        pz = -dp["payload_position_ned.z"]
-        axes[0].plot(px, py, color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
-        axes[1].plot(px, pz, color=PAYLOAD_COLOR, lw=1.5, ls='--')
-        axes[2].plot(py, pz, color=PAYLOAD_COLOR, lw=1.5, ls='--')
-        axes[0].plot(dp["payload_target_ned.x"], dp["payload_target_ned.y"],
-                     color='purple', lw=1.0, ls=':', label="Target")
-
-    titles = ["Top view (XY)", "Front view (XZ)", "Side view (YZ)"]
-    xlabels = ["X (m)", "X (m)", "Y (m)"]
-    ylabels = ["Y (m)", "Z (m, up+)", "Z (m, up+)"]
-    for ax, t, xl, yl in zip(axes, titles, xlabels, ylabels):
-        ax.set_title(t, fontsize=11); ax.set_xlabel(xl); ax.set_ylabel(yl)
-        ax.grid(True, alpha=0.3); ax.set_aspect('equal')
-    axes[0].legend(fontsize=9, ncol=2)
-    fig.suptitle("Trajectories – 3 Projections", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "01_3d_trajectories.png", dpi=150)
-
-# ── 2. Top-down 2-D trajectory (XY) ───────────────────────────────────────────
-def plot_xy_trajectory():
-    print("[2] XY top-down trajectory")
-    fig, ax = plt.subplots(figsize=(10, 8))
-
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        lc = colored_line(ax, df["x"].values, df["y"].values, df["t"].values,
-                          cmap='plasma', lw=1.8)
-        ax.scatter(df["x"].iloc[0],  df["y"].iloc[0],  color=UAV_COLORS[uid],
-                   marker='o', s=80, zorder=6, label=f"{UAV_LABELS[uid]} start")
-        ax.scatter(df["x"].iloc[-1], df["y"].iloc[-1], color=UAV_COLORS[uid],
-                   marker='*', s=140, zorder=6, label=f"{UAV_LABELS[uid]} end")
-
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        ax.plot(dp["payload_position_ned.x"], dp["payload_position_ned.y"],
-                color=PAYLOAD_COLOR, lw=1.8, ls='--', label="Payload", alpha=0.9)
-        ax.plot(dp["payload_target_ned.x"], dp["payload_target_ned.y"],
-                color='purple', lw=1.2, ls=':', label="Target", alpha=0.8)
-
-    ax.set_xlabel("X NED (m)"); ax.set_ylabel("Y NED (m)")
-    ax.set_title("Top-down Trajectory (XY) – color = time", fontsize=14, fontweight='bold')
-    ax.legend(fontsize=8, ncol=2); ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    savefig(fig, "02_xy_trajectory.png")
-
-# ── 3. Position vs time (X, Y, Z) – payload only ──────────────────────────────
-def plot_position_time():
-    print("[3] Position vs time (payload)")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        print("   no planner data, skipping")
-        return
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    axes[0].plot(dp["t"], dp["payload_position_ned.x"],
-                 color=PAYLOAD_COLOR, lw=1.5, ls='-', label="Payload")
-    axes[0].plot(dp["t"], dp["payload_target_ned.x"],
-                 color='purple', lw=1.0, ls='--', label="Target")
-    axes[1].plot(dp["t"], dp["payload_position_ned.y"],
-                 color=PAYLOAD_COLOR, lw=1.5, ls='-')
-    axes[1].plot(dp["t"], dp["payload_target_ned.y"],
-                 color='purple', lw=1.0, ls='--')
-    axes[2].plot(dp["t"], -dp["payload_position_ned.z"],
-                 color=PAYLOAD_COLOR, lw=1.5, ls='-')
-    axes[2].plot(dp["t"], -dp["payload_target_ned.z"],
-                 color='purple', lw=1.0, ls='--')
-
-    labels = ["X (m)", "Y (m)", "Z (m, up+)"]
-    for ax, lbl in zip(axes, labels):
-        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Payload Position vs Time", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "03_position_time.png")
-
-# ── 4. Velocity vs time ────────────────────────────────────────────────────────
-def plot_velocity_time():
-    print("[4] Velocity vs time")
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        axes[0].plot(df["t"], df["vx"], color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
-        axes[1].plot(df["t"], df["vy"], color=UAV_COLORS[uid], lw=1.2)
-        axes[2].plot(df["t"], df["vz"], color=UAV_COLORS[uid], lw=1.2)
-
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        axes[0].plot(dp["t"], dp["payload_velocity_ned.x"], color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
-        axes[1].plot(dp["t"], dp["payload_velocity_ned.y"], color=PAYLOAD_COLOR, lw=1.5, ls='--')
-        axes[2].plot(dp["t"], dp["payload_velocity_ned.z"], color=PAYLOAD_COLOR, lw=1.5, ls='--')
-
-    for ax, lbl in zip(axes, ["Vx (m/s)", "Vy (m/s)", "Vz (m/s)"]):
-        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9, ncol=4)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Velocity vs Time – UAVs & Payload", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "04_velocity_time.png")
-
-# ── 5. Attitude (roll, pitch, yaw) ────────────────────────────────────────────
-def plot_attitude():
-    print("[5] Attitude (Euler) vs time")
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-
-    for uid in UAV_IDS:
-        df = load(f"px4_{uid}_fmu_out_vehicle_attitude.csv")
-        if df is None: continue
-        roll, pitch, yaw = quat_to_euler(df["q[0]"], df["q[1]"], df["q[2]"], df["q[3]"])
-        axes[0].plot(df["t"], roll,  color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
-        axes[1].plot(df["t"], pitch, color=UAV_COLORS[uid], lw=1.2)
-        axes[2].plot(df["t"], yaw,   color=UAV_COLORS[uid], lw=1.2)
-
-    for ax, lbl in zip(axes, ["Roll (°)", "Pitch (°)", "Yaw (°)"]):
-        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Attitude Euler Angles vs Time", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "05_attitude_euler.png")
-
-# ── 6. Attitude setpoint vs actual ────────────────────────────────────────────
-def plot_attitude_tracking():
-    print("[6] Attitude tracking (setpoint vs actual)")
-    fig, axes = plt.subplots(3, len(UAV_IDS), figsize=(16, 10), sharex='col')
+def _uav_force_grid(rows_keys, rows_labels, title, filename):
+    """
+    Generic 3-col (UAV) × N-row (force key) grid.
+    rows_keys: list of column-name prefixes, e.g. ["spring_force", "damping_force"]
+    rows_labels: matching y-axis labels
+    """
+    n_rows = len(rows_keys)
+    fig, axes = plt.subplots(n_rows, 3, figsize=(16, 3.2 * n_rows), sharex=True)
+    axes = np.atleast_2d(axes)
 
     for col, uid in enumerate(UAV_IDS):
-        da = load(f"px4_{uid}_fmu_out_vehicle_attitude.csv")
-        ds = load(f"px4_{uid}_fmu_in_vehicle_attitude_setpoint.csv")
-        if da is None or ds is None: continue
-
-        roll_a, pitch_a, yaw_a = quat_to_euler(da["q[0]"], da["q[1]"], da["q[2]"], da["q[3]"])
-        roll_s, pitch_s, yaw_s = quat_to_euler(ds["q_d[0]"], ds["q_d[1]"], ds["q_d[2]"], ds["q_d[3]"])
-
-        axes[0, col].plot(da["t"], roll_a,  color='steelblue', lw=1.2, label='actual')
-        axes[0, col].plot(ds["t"], roll_s,  color='tomato',    lw=1.0, ls='--', label='setpoint')
-        axes[1, col].plot(da["t"], pitch_a, color='steelblue', lw=1.2)
-        axes[1, col].plot(ds["t"], pitch_s, color='tomato',    lw=1.0, ls='--')
-        axes[2, col].plot(da["t"], yaw_a,   color='steelblue', lw=1.2)
-        axes[2, col].plot(ds["t"], yaw_s,   color='tomato',    lw=1.0, ls='--')
-
-        axes[0, col].set_title(UAV_LABELS[uid], fontweight='bold')
-        for ax in axes[:, col]: ax.grid(True, alpha=0.3)
+        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
+        axes[0, col].set_title(UAV_LABELS[uid], fontweight='bold', fontsize=11)
         axes[-1, col].set_xlabel("Time (s)")
-
-    axes[0, 0].legend(fontsize=9)
-    for ax, lbl in zip(axes[:, 0], ["Roll (°)", "Pitch (°)", "Yaw (°)"]):
-        ax.set_ylabel(lbl)
-    fig.suptitle("Attitude Setpoint vs Actual", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "06_attitude_tracking.png")
-
-# ── 7. Commanded thrust ────────────────────────────────────────────────────────
-def plot_thrust():
-    print("[7] Commanded thrust vs time")
-    fig, ax = plt.subplots(figsize=(14, 5))
-
-    for uid in UAV_IDS:
-        ds = load(f"px4_{uid}_fmu_in_vehicle_attitude_setpoint.csv")
-        if ds is None: continue
-        # thrust_body[2] is negative thrust in PX4 convention
-        thrust = -ds["thrust_body[2]"]
-        ax.plot(ds["t"], thrust, color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
-
-    ax.set_xlabel("Time (s)"); ax.set_ylabel("Normalized Thrust")
-    ax.set_title("Commanded Thrust vs Time", fontsize=14, fontweight='bold')
-    ax.legend(); ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    savefig(fig, "07_commanded_thrust.png")
-
-# ── 8. Inter-UAV distances ─────────────────────────────────────────────────────
-def plot_inter_uav_distances():
-    print("[8] Inter-UAV distances")
-    fig, ax = plt.subplots(figsize=(14, 6))
-
-    dfs = {}
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is not None:
-            dfs[uid] = df
-
-    pairs = [(1,2), (1,3), (2,3)]
-    colors_pair = ['#8E44AD', '#16A085', '#D35400']
-    for (i, j), col in zip(pairs, colors_pair):
-        if i not in dfs or j not in dfs: continue
-        a, b = dfs[i], dfs[j]
-        # Align on time using interpolation
-        t_common = np.linspace(max(a["t"].min(), b["t"].min()),
-                               min(a["t"].max(), b["t"].max()), 2000)
-        xi = np.interp(t_common, a["t"], a["x"])
-        yi = np.interp(t_common, a["t"], a["y"])
-        zi = np.interp(t_common, a["t"], a["z"])
-        xj = np.interp(t_common, b["t"], b["x"])
-        yj = np.interp(t_common, b["t"], b["y"])
-        zj = np.interp(t_common, b["t"], b["z"])
-        dist = np.sqrt((xi-xj)**2 + (yi-yj)**2 + (zi-zj)**2)
-        ax.plot(t_common, dist, color=col, lw=1.5, label=f"UAV-{i} ↔ UAV-{j}")
-
-    ax.set_xlabel("Time (s)"); ax.set_ylabel("Distance (m)")
-    ax.set_title("Inter-UAV Distances vs Time", fontsize=14, fontweight='bold')
-    ax.legend(); ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    savefig(fig, "08_inter_uav_distances.png")
-
-# ── 9. Payload tracking error ──────────────────────────────────────────────────
-def plot_payload_tracking_error():
-    print("[9] Payload tracking error")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        print("   no data, skipping")
-        return
-
-    ex = dp["payload_position_ned.x"] - dp["payload_target_ned.x"]
-    ey = dp["payload_position_ned.y"] - dp["payload_target_ned.y"]
-    ez = dp["payload_position_ned.z"] - dp["payload_target_ned.z"]
-    err_total = np.sqrt(ex**2 + ey**2 + ez**2)
-
-    fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
-    axes[0].plot(dp["t"], ex,        color='#E74C3C', lw=1.2, label='Ex')
-    axes[1].plot(dp["t"], ey,        color='#2ECC71', lw=1.2, label='Ey')
-    axes[2].plot(dp["t"], ez,        color='#3498DB', lw=1.2, label='Ez')
-    axes[3].plot(dp["t"], err_total, color='#8E44AD', lw=1.5, label='|E|')
-    axes[3].fill_between(dp["t"], 0, err_total, color='#8E44AD', alpha=0.2)
-
-    for ax, lbl in zip(axes, ["Ex (m)", "Ey (m)", "Ez (m)", "|E| (m)"]):
-        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.5)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Payload Position Tracking Error", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "09_payload_tracking_error.png")
-
-# ── 10. Desired acceleration (planner output) ─────────────────────────────────
-def plot_desired_acceleration():
-    print("[10] Desired acceleration")
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    has_data = False
-
-    for uid in UAV_IDS:
-        df = load(f"px4_{uid}_swarm_planner_debug.csv")
-        if df is None: continue
-        if not has_columns(df, "desired_acceleration.x", "desired_acceleration.y", "desired_acceleration.z"): continue
-        has_data = True
-        axes[0].plot(df["t"], df["desired_acceleration.x"], color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
-        axes[1].plot(df["t"], df["desired_acceleration.y"], color=UAV_COLORS[uid], lw=1.2)
-        axes[2].plot(df["t"], df["desired_acceleration.z"], color=UAV_COLORS[uid], lw=1.2)
-
-    for ax, lbl in zip(axes, ["ax (m/s²)", "ay (m/s²)", "az (m/s²)"]):
-        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.5)
-    if has_data:
-        axes[0].legend(fontsize=9)
-    else:
-        axes[0].text(0.5, 0.5, "not available", ha='center', va='center',
-                     transform=axes[0].transAxes, fontsize=10)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Planner Desired Acceleration vs Time", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "10_desired_acceleration.png")
-
-# ── 11. Beta coefficients ──────────────────────────────────────────────────────
-def plot_beta():
-    print("[11] Beta coefficients")
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-
-    for uid in UAV_IDS:
-        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
-        if dp is None: continue
-        for i, ax in enumerate(axes):
-            ax.plot(dp["t"], dp[f"beta[{i}]"], color=UAV_COLORS[uid],
-                    lw=1.2, label=UAV_LABELS[uid] if i == 0 else "")
-
-    for i, ax in enumerate(axes):
-        ax.set_ylabel(f"β[{i}]"); ax.grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Beta Coefficients (Force Allocation) vs Time", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "11_beta_coefficients.png")
-
-# ── 12. Virtual positions ──────────────────────────────────────────────────────
-def plot_virtual_positions():
-    print("[12] Virtual formation positions")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        print("   no data, skipping")
-        return
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    cmaps = plt.cm.Set1.colors
-    for vi in range(5):
-        c = cmaps[vi % len(cmaps)]
-        axes[0].plot(dp["t"], dp[f"virtual_positions_ned[{vi}].x"],
-                     color=c, lw=1.2, label=f"VP-{vi}")
-        axes[1].plot(dp["t"], dp[f"virtual_positions_ned[{vi}].y"], color=c, lw=1.2)
-        axes[2].plot(dp["t"], dp[f"virtual_positions_ned[{vi}].z"], color=c, lw=1.2)
-
-    for ax, lbl in zip(axes, ["X (m)", "Y (m)", "Z (m)"]):
-        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9, ncol=5)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Virtual Formation Positions (NED) vs Time", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "12_virtual_positions.png")
-
-# ── 13. CFO / passive / virtual acceleration ─────────────────────────────────
-def plot_control_forces():
-    print("[13] Control forces (CFO / passive / virtual)")
-    fig, axes = plt.subplots(3, 3, figsize=(16, 10), sharex=True)
-
-    for col, uid in enumerate(UAV_IDS):
-        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
-        if dp is None: continue
-
-        for row, (key, color) in enumerate([
-            ("passive_force",       "#E74C3C"),
-            ("virtual_acceleration","#2ECC71"),
-            ("cfo_acceleration",    "#3498DB"),
-        ]):
+        for row, (key, ylabel) in enumerate(zip(rows_keys, rows_labels)):
             ax = axes[row, col]
-            if not has_columns(dp, f"{key}.x", f"{key}.y", f"{key}.z"):
-                ax.text(0.5, 0.5, "not available", ha='center', va='center',
-                        transform=ax.transAxes, fontsize=9)
+            if dp is not None:
+                _plot_xyz_force(ax, dp, key)
+            else:
+                ax.text(0.5, 0.5, "no data", ha='center', va='center',
+                        transform=ax.transAxes, fontsize=8, color='gray')
                 ax.grid(True, alpha=0.3)
-                if col == 0:
-                    ax.set_ylabel(key.replace('_', '\n'), fontsize=8)
-                if row == 0:
-                    ax.set_title(UAV_LABELS[uid], fontweight='bold')
-                if row == 2:
-                    ax.set_xlabel("Time (s)")
-                continue
-            ax.plot(dp["t"], dp[f"{key}.x"], color='#E74C3C', lw=1.0, label='x')
-            ax.plot(dp["t"], dp[f"{key}.y"], color='#2ECC71', lw=1.0, label='y')
-            ax.plot(dp["t"], dp[f"{key}.z"], color='#3498DB', lw=1.0, label='z')
-            ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.5)
             if col == 0:
-                ax.set_ylabel(key.replace('_', '\n'), fontsize=8)
-            if row == 0:
-                ax.set_title(UAV_LABELS[uid], fontweight='bold')
-            if row == 2:
-                ax.set_xlabel("Time (s)")
+                ax.set_ylabel(ylabel, fontsize=9)
 
-    axes[0, 0].legend(fontsize=8)
-    fig.suptitle("Control Forces: Passive / Virtual / CFO Acceleration",
-                 fontsize=14, fontweight='bold')
+    # Legend on top-left subplot
+    axes[0, 0].plot([], [], color=XYZ_COLORS[0], lw=1.2, label='x')
+    axes[0, 0].plot([], [], color=XYZ_COLORS[1], lw=1.2, label='y')
+    axes[0, 0].plot([], [], color=XYZ_COLORS[2], lw=1.2, label='z')
+    axes[0, 0].legend(fontsize=8, loc='upper right')
+
+    fig.suptitle(title, fontsize=13, fontweight='bold')
     fig.tight_layout()
-    savefig(fig, "13_control_forces.png")
-
-# ── 14. Structure lock + valid status ─────────────────────────────────────────
-def plot_status_flags():
-    print("[14] Status flags (structure_locked, valid, used_cfo)")
-    flags = []
-    for flag in ["structure_locked", "valid", "used_cfo"]:
-        if any(
-            (dp := load(f"px4_{uid}_swarm_planner_debug.csv")) is not None and flag in dp.columns
-            for uid in UAV_IDS
-        ):
-            flags.append(flag)
-    if not flags:
-        print("   no status flags, skipping")
-        return
-
-    fig, axes = plt.subplots(len(flags), 1, figsize=(14, 2.5 * len(flags) + 1), sharex=True)
-    axes = np.atleast_1d(axes)
-
-    for uid in UAV_IDS:
-        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
-        if dp is None: continue
-        offset = (uid - 1) * 0.1
-        for ax, flag in zip(axes, flags):
-            if flag not in dp.columns:
-                continue
-            val = dp[flag].astype(float) + offset
-            ax.step(dp["t"], val, where='post', color=UAV_COLORS[uid],
-                    lw=1.5, label=UAV_LABELS[uid])
-
-    for ax, flag in zip(axes, flags):
-        ax.set_ylabel(flag, fontsize=9); ax.grid(True, alpha=0.3)
-        ax.set_yticks([0, 0.1, 0.2, 1.0, 1.1, 1.2])
-    axes[0].legend(fontsize=9, ncol=3)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Swarm Planner Status Flags", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "14_status_flags.png")
-
-# ── 15. Formation shape snapshots ─────────────────────────────────────────────
-def plot_formation_snapshots():
-    print("[15] Formation shape snapshots")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        print("   no data, skipping")
-        return
-
-    t_total = dp["t"].max()
-    snap_times = np.linspace(0.1 * t_total, 0.9 * t_total, 6)
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-
-    for ax, ts in zip(axes.flat, snap_times):
-        idx = (dp["t"] - ts).abs().idxmin()
-        row = dp.loc[idx]
-        # UAV positions
-        for vi, uid in enumerate(UAV_IDS):
-            x = row[f"uav_positions_ned[{vi}].x"]
-            y = row[f"uav_positions_ned[{vi}].y"]
-            ax.scatter(x, y, color=UAV_COLORS[uid], s=120, zorder=5,
-                       label=UAV_LABELS[uid])
-            ax.annotate(UAV_LABELS[uid], (x, y), textcoords="offset points",
-                        xytext=(5, 5), fontsize=8)
-        # Payload
-        px = row["payload_position_ned.x"]
-        py = row["payload_position_ned.y"]
-        ax.scatter(px, py, color=PAYLOAD_COLOR, s=150, marker='D', zorder=5, label="Payload")
-        # Target
-        tx = row["payload_target_ned.x"]
-        ty = row["payload_target_ned.y"]
-        ax.scatter(tx, ty, color='purple', s=100, marker='*', zorder=5, label="Target")
-        # Virtual positions
-        for vi in range(5):
-            vx = row[f"virtual_positions_ned[{vi}].x"]
-            vy = row[f"virtual_positions_ned[{vi}].y"]
-            ax.scatter(vx, vy, color='gray', s=40, marker='^', alpha=0.6, zorder=4)
-
-        ax.set_title(f"t = {ts:.1f} s", fontsize=10)
-        ax.grid(True, alpha=0.3); ax.set_aspect('equal')
-        ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
-
-    # One legend in last subplot
-    handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower right', fontsize=9)
-    fig.suptitle("Formation Shape Snapshots (XY plane)", fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "15_formation_snapshots.png")
-
-# ── 16. Speed (|V|) over time ─────────────────────────────────────────────────
-def plot_speed():
-    print("[16] Speed |V| over time")
-    fig, ax = plt.subplots(figsize=(14, 5))
-
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        spd = np.sqrt(df["vx"]**2 + df["vy"]**2 + df["vz"]**2)
-        ax.plot(df["t"], spd, color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
-
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        pspd = np.sqrt(dp["payload_velocity_ned.x"]**2 +
-                       dp["payload_velocity_ned.y"]**2 +
-                       dp["payload_velocity_ned.z"]**2)
-        ax.plot(dp["t"], pspd, color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
-
-    ax.set_xlabel("Time (s)"); ax.set_ylabel("|V| (m/s)")
-    ax.set_title("Total Speed vs Time", fontsize=14, fontweight='bold')
-    ax.legend(); ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    savefig(fig, "16_speed.png")
-
-# ── 17. Altitude profile ──────────────────────────────────────────────────────
-def plot_altitude():
-    print("[17] Altitude profile")
-    fig, ax = plt.subplots(figsize=(14, 5))
-
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        ax.plot(df["t"], -df["z"], color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
-
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is not None:
-        ax.plot(dp["t"], -dp["payload_position_ned.z"],
-                color=PAYLOAD_COLOR, lw=1.5, ls='--', label="Payload")
-        ax.plot(dp["t"], -dp["payload_target_ned.z"],
-                color='purple', lw=1.0, ls=':', label="Target altitude")
-
-    ax.set_xlabel("Time (s)"); ax.set_ylabel("Altitude (m, up+)")
-    ax.set_title("Altitude Profile vs Time", fontsize=14, fontweight='bold')
-    ax.legend(); ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    savefig(fig, "17_altitude_profile.png")
-
-# ── 18. UAV-to-virtual projection gap ─────────────────────────────────────────
-def plot_uav_virtual_error():
-    print("[18] UAV-to-virtual projection gap")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        print("   no data, skipping")
-        return
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-
-    for vi, uid in enumerate(UAV_IDS):
-        ex = dp[f"uav_positions_ned[{vi}].x"] - dp[f"virtual_positions_ned[{vi}].x"]
-        ey = dp[f"uav_positions_ned[{vi}].y"] - dp[f"virtual_positions_ned[{vi}].y"]
-        ez = dp[f"uav_positions_ned[{vi}].z"] - dp[f"virtual_positions_ned[{vi}].z"]
-        err = np.sqrt(ex**2 + ey**2 + ez**2)
-        axes[0].plot(dp["t"], ex,  color=UAV_COLORS[uid], lw=1.2, label=UAV_LABELS[uid])
-        axes[1].plot(dp["t"], ey,  color=UAV_COLORS[uid], lw=1.2)
-        axes[2].plot(dp["t"], err, color=UAV_COLORS[uid], lw=1.2)
-
-    for ax, lbl in zip(axes, ["ΔX (m)", "ΔY (m)", "|ΔPos| (m)"]):
-        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.5)
-    axes[0].legend(fontsize=9)
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("UAV-to-Virtual Projection Gap (Geometry, Not Tracking Error)",
-                 fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "18_uav_virtual_error.png")
-
-# ── 18b. Virtual-node rest_length error ───────────────────────────────────────
-def plot_formation_rest_length_error():
-    """Plot virtual-node structural distance error: |q_i-q_j| - rest_length."""
-    print("[18b] Virtual-node rest_length error")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        print("   no data, skipping")
-        return
-
-    needed = [f"rest_lengths[{i}]" for i in range(25)]
-    for i in range(5):
-        for c in ["x", "y", "z"]:
-            needed.append(f"virtual_positions_ned[{i}].{c}")
-    if not has_columns(dp, *needed):
-        print("   missing columns, skipping")
-        return
-
-    # Build 5x5 rest_lengths (row-major)
-    rl = np.array([[dp[f"rest_lengths[{i*5+j}]"].iloc[0] for j in range(5)] for i in range(5)])
-
-    pairs = [(0, 1), (0, 2), (1, 2), (0, 3), (0, 4), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]
-    labels = ["1↔2", "1↔3", "2↔3", "1↔u", "1↔l", "2↔u", "2↔l", "3↔u", "3↔l", "u↔l"]
-    colors = ['#8E44AD', '#16A085', '#D35400', '#E74C3C', '#2ECC71', '#3498DB',
-              '#F39C12', '#1ABC9C', '#9B59B6', '#95A5A6']
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
-    ax_err, ax_abs = axes
-
-    for (i, j), lbl, col in zip(pairs, labels, colors):
-        ref = rl[i, j]
-        if ref <= 0:
-            continue
-        p_i = virtual_node_position(dp, i)
-        p_j = virtual_node_position(dp, j)
-        actual = np.sqrt((p_i[0] - p_j[0])**2 + (p_i[1] - p_j[1])**2 + (p_i[2] - p_j[2])**2)
-        err = actual - ref
-        ax_err.plot(dp["t"], err, color=col, lw=1.2, label=f"{lbl} (ref={ref:.2f})")
-        ax_abs.plot(dp["t"], np.abs(err), color=col, lw=1.0, alpha=0.8)
-
-    ax_err.axhline(0, color='k', lw=0.5, linestyle='--')
-    ax_err.set_ylabel("Δ (virtual − rest_length) (m)"); ax_err.legend(fontsize=8, ncol=2)
-    ax_err.grid(True, alpha=0.3)
-    ax_abs.set_ylabel("|Δ| (m)"); ax_abs.set_xlabel("Time (s)")
-    ax_abs.grid(True, alpha=0.3)
-    fig.suptitle("Virtual-Node Rest-Length Error (planner.yaml structure_reference.rest_lengths)",
-                 fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    savefig(fig, "18b_formation_rest_length_error.png")
-
-# ── 19. FSM debug: position + attitude tracking (per UAV) ─────────────────────
-def plot_fsm_tracking():
-    print("[19] FSM position + attitude control outputs")
-    for uid in UAV_IDS:
-        df = load(f"px4_{uid}_fsmpx4_fsm_debug.csv")
-        if df is None: continue
-
-        fig = plt.figure(figsize=(16, 12))
-        gs  = gridspec.GridSpec(3, 2, figure=fig)
-
-        # commanded position vs actual
-        ax0 = fig.add_subplot(gs[0, 0])
-        ax0.plot(df["t"], df["cmd_position.x"], 'r--', lw=1.0, label='cmd X')
-        ax0.plot(df["t"], df["uav_position.x"], 'r-',  lw=1.2, label='act X')
-        ax0.plot(df["t"], df["cmd_position.y"], 'g--', lw=1.0, label='cmd Y')
-        ax0.plot(df["t"], df["uav_position.y"], 'g-',  lw=1.2, label='act Y')
-        ax0.set_ylabel("Position (m)"); ax0.legend(fontsize=7, ncol=4); ax0.grid(True, alpha=0.3)
-        ax0.set_title("Position XY cmd vs actual")
-
-        ax1 = fig.add_subplot(gs[0, 1])
-        ax1.plot(df["t"], df["cmd_position.z"], 'b--', lw=1.0, label='cmd Z')
-        ax1.plot(df["t"], df["uav_position.z"], 'b-',  lw=1.2, label='act Z')
-        ax1.set_ylabel("Z (m)"); ax1.legend(fontsize=8); ax1.grid(True, alpha=0.3)
-        ax1.set_title("Altitude cmd vs actual")
-
-        # velocity
-        ax2 = fig.add_subplot(gs[1, 0])
-        for comp, col in zip(['x','y','z'], ['r','g','b']):
-            ax2.plot(df["t"], df[f"cmd_velocity.{comp}"], color=col, ls='--', lw=1.0, label=f'cmd {comp}')
-            ax2.plot(df["t"], df[f"uav_velocity.{comp}"], color=col, ls='-',  lw=1.2, label=f'act {comp}')
-        ax2.set_ylabel("Velocity (m/s)"); ax2.legend(fontsize=7, ncol=6); ax2.grid(True, alpha=0.3)
-        ax2.set_title("Velocity cmd vs actual")
-
-        # angular velocity
-        ax3 = fig.add_subplot(gs[1, 1])
-        for comp, col in zip(['x','y','z'], ['r','g','b']):
-            ax3.plot(df["t"], df[f"uav_angular_velocity.{comp}"],
-                     color=col, lw=1.2, label=comp)
-        ax3.set_ylabel("ω (rad/s)"); ax3.legend(fontsize=9); ax3.grid(True, alpha=0.3)
-        ax3.set_title("Angular Velocity")
-
-        # hover thrust
-        ax4 = fig.add_subplot(gs[2, 0])
-        ax4.plot(df["t"], df["uav_hover_thrust"], color='#8E44AD', lw=1.5)
-        ax4.set_ylabel("Hover Thrust"); ax4.grid(True, alpha=0.3)
-        ax4.set_title("Estimated Hover Thrust"); ax4.set_xlabel("Time (s)")
-
-        # control thrust
-        ax5 = fig.add_subplot(gs[2, 1])
-        ax5.plot(df["t"], df["control_thrust"], color='#16A085', lw=1.5)
-        ax5.set_ylabel("Control Thrust"); ax5.grid(True, alpha=0.3)
-        ax5.set_title("Control Thrust"); ax5.set_xlabel("Time (s)")
-
-        fig.suptitle(f"FSM Debug – {UAV_LABELS[uid]}", fontsize=14, fontweight='bold')
-        fig.tight_layout()
-        savefig(fig, f"19_fsm_debug_uav{uid}.png")
-
-# ── 20. Summary dashboard ─────────────────────────────────────────────────────
-def plot_dashboard():
-    print("[20] Summary dashboard")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    fig = plt.figure(figsize=(18, 10))
-    gs  = gridspec.GridSpec(2, 4, figure=fig, hspace=0.45, wspace=0.35)
-
-    # Top-down trajectory (XY)
-    ax3d = fig.add_subplot(gs[0, 0])
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        ax3d.plot(df["x"], df["y"], color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
-    if dp is not None:
-        ax3d.plot(dp["payload_position_ned.x"], dp["payload_position_ned.y"],
-                  color=PAYLOAD_COLOR, lw=1.2, ls='--', label="Payload")
-    ax3d.set_title("Top-down Trajectory (XY)", fontsize=10)
-    ax3d.set_xlabel("X (m)"); ax3d.set_ylabel("Y (m)")
-    ax3d.legend(fontsize=7); ax3d.grid(True, alpha=0.3); ax3d.set_aspect('equal')
-
-    # altitude
-    ax_alt = fig.add_subplot(gs[0, 1])
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        ax_alt.plot(df["t"], -df["z"], color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
-    if dp is not None:
-        ax_alt.plot(dp["t"], -dp["payload_position_ned.z"],
-                    color=PAYLOAD_COLOR, lw=1.2, ls='--', label="Payload")
-    ax_alt.set_title("Altitude (m)"); ax_alt.legend(fontsize=7); ax_alt.grid(True, alpha=0.3)
-
-    # payload error
-    ax_err = fig.add_subplot(gs[0, 2])
-    if dp is not None:
-        err = np.sqrt((dp["payload_position_ned.x"]-dp["payload_target_ned.x"])**2 +
-                      (dp["payload_position_ned.y"]-dp["payload_target_ned.y"])**2 +
-                      (dp["payload_position_ned.z"]-dp["payload_target_ned.z"])**2)
-        ax_err.plot(dp["t"], err, color='#8E44AD', lw=1.2)
-        ax_err.fill_between(dp["t"], 0, err, color='#8E44AD', alpha=0.2)
-    ax_err.set_title("Payload Tracking Error (m)"); ax_err.grid(True, alpha=0.3)
-
-    # speed
-    ax_spd = fig.add_subplot(gs[0, 3])
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is None: continue
-        spd = np.sqrt(df["vx"]**2 + df["vy"]**2 + df["vz"]**2)
-        ax_spd.plot(df["t"], spd, color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
-    ax_spd.set_title("Speed (m/s)"); ax_spd.legend(fontsize=7); ax_spd.grid(True, alpha=0.3)
-
-    # beta
-    ax_beta = fig.add_subplot(gs[1, 0])
-    if dp is not None:
-        for i, col in enumerate(['#E74C3C', '#2ECC71', '#3498DB']):
-            ax_beta.plot(dp["t"], dp[f"beta[{i}]"], color=col, lw=1.0, label=f"β[{i}]")
-    ax_beta.set_title("Beta Coefficients"); ax_beta.legend(fontsize=7); ax_beta.grid(True, alpha=0.3)
-
-    # inter-UAV dist
-    ax_dist = fig.add_subplot(gs[1, 1])
-    dfs = {}
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is not None: dfs[uid] = df
-    pairs = [(1,2,'#8E44AD'),(1,3,'#16A085'),(2,3,'#D35400')]
-    for (i, j, col) in pairs:
-        if i not in dfs or j not in dfs: continue
-        a, b = dfs[i], dfs[j]
-        t_c = np.linspace(max(a["t"].min(),b["t"].min()), min(a["t"].max(),b["t"].max()), 1000)
-        d = np.sqrt((np.interp(t_c,a["t"],a["x"])-np.interp(t_c,b["t"],b["x"]))**2 +
-                    (np.interp(t_c,a["t"],a["y"])-np.interp(t_c,b["t"],b["y"]))**2 +
-                    (np.interp(t_c,a["t"],a["z"])-np.interp(t_c,b["t"],b["z"]))**2)
-        ax_dist.plot(t_c, d, color=col, lw=1.0, label=f"{i}↔{j}")
-    ax_dist.set_title("Inter-UAV Distance (m)"); ax_dist.legend(fontsize=7); ax_dist.grid(True, alpha=0.3)
-
-    # attitude roll/pitch
-    ax_att = fig.add_subplot(gs[1, 2])
-    for uid in UAV_IDS:
-        df = load(f"px4_{uid}_fmu_out_vehicle_attitude.csv")
-        if df is None: continue
-        roll, pitch, _ = quat_to_euler(df["q[0]"], df["q[1]"], df["q[2]"], df["q[3]"])
-        ax_att.plot(df["t"], roll,  color=UAV_COLORS[uid], lw=0.8, ls='-', alpha=0.8)
-        ax_att.plot(df["t"], pitch, color=UAV_COLORS[uid], lw=0.8, ls='--', alpha=0.8)
-    ax_att.set_title("Roll (–) Pitch (--) (°)"); ax_att.grid(True, alpha=0.3)
-
-    # desired accel magnitude
-    ax_acc = fig.add_subplot(gs[1, 3])
-    for uid in UAV_IDS:
-        df = load(f"px4_{uid}_planner_desired_acceleration.csv")
-        if df is None: continue
-        mag = np.sqrt(df["vector.x"]**2 + df["vector.y"]**2 + df["vector.z"]**2)
-        ax_acc.plot(df["t"], mag, color=UAV_COLORS[uid], lw=1.0, label=UAV_LABELS[uid])
-    ax_acc.set_title("|Desired Accel| (m/s²)")
-    add_legend_if_handles(ax_acc, fontsize=7)
-    ax_acc.grid(True, alpha=0.3)
-
-    fig.suptitle("Swarm Flight – Summary Dashboard", fontsize=16, fontweight='bold')
-    savefig(fig, "00_summary_dashboard.png", dpi=120)
+    savefig(fig, filename)
 
 
-def compute_inter_uav_distance_series():
-    dfs = {}
-    for uid in UAV_IDS:
-        df = load_uav_kinematics(uid)
-        if df is not None:
-            dfs[uid] = df
-
-    series = []
-    for i, j, color in [(1, 2, '#8E44AD'), (1, 3, '#16A085'), (2, 3, '#D35400')]:
-        if i not in dfs or j not in dfs:
-            continue
-        a, b = dfs[i], dfs[j]
-        t_common = np.linspace(max(a["t"].min(), b["t"].min()),
-                               min(a["t"].max(), b["t"].max()), 1200)
-        dist = np.sqrt((np.interp(t_common, a["t"], a["x"]) - np.interp(t_common, b["t"], b["x"]))**2 +
-                       (np.interp(t_common, a["t"], a["y"]) - np.interp(t_common, b["t"], b["y"]))**2 +
-                       (np.interp(t_common, a["t"], a["z"]) - np.interp(t_common, b["t"], b["z"]))**2)
-        series.append((f"UAV-{i}↔UAV-{j}", color, t_common, dist))
-    return series
-
-
-def compute_rest_length_error_summary():
-    dp = load("px4_1_swarm_planner_debug.csv")
-    if dp is None:
-        return None
-
-    needed = [f"rest_lengths[{i}]" for i in range(25)]
-    for i in range(5):
-        for c in ["x", "y", "z"]:
-            needed.append(f"virtual_positions_ned[{i}].{c}")
-    if not has_columns(dp, *needed):
-        return None
-
-    rl = np.array([[dp[f"rest_lengths[{i * 5 + j}]"].iloc[0] for j in range(5)] for i in range(5)])
-
-    abs_errors = []
-    for i, j in [(0, 1), (0, 2), (1, 2), (0, 3), (0, 4), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]:
-        ref = rl[i, j]
-        if ref <= 0:
-            continue
-        p_i = virtual_node_position(dp, i)
-        p_j = virtual_node_position(dp, j)
-        actual = np.sqrt((p_i[0] - p_j[0])**2 + (p_i[1] - p_j[1])**2 + (p_i[2] - p_j[2])**2)
-        abs_errors.append(np.abs(actual - ref))
-
-    if not abs_errors:
-        return None
-
-    abs_errors = np.vstack(abs_errors)
-    return dp["t"], abs_errors.mean(axis=0), abs_errors.max(axis=0)
-
-
-def plot_paper_overview():
-    print("[P1] Paper overview")
-    dp = load("px4_1_swarm_planner_debug.csv")
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+# ── 1. Trajectory overview ─────────────────────────────────────────────────────
+def plot_overview():
+    print("[1] Trajectory overview")
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     ax_xy, ax_alt = axes
 
     for uid in UAV_IDS:
         df = load_uav_kinematics(uid)
         if df is None:
             continue
-        ax_xy.plot(df["x"], df["y"], color=UAV_COLORS[uid], lw=1.6, label=UAV_LABELS[uid])
-        ax_xy.scatter(df["x"].iloc[0], df["y"].iloc[0], color=UAV_COLORS[uid], marker='o', s=40, zorder=6)
+        ax_xy.plot(df["x"], df["y"], color=UAV_COLORS[uid], lw=1.4, label=UAV_LABELS[uid])
+        ax_xy.scatter(df["x"].iloc[0],  df["y"].iloc[0],  color=UAV_COLORS[uid], marker='o', s=50, zorder=6)
         ax_xy.scatter(df["x"].iloc[-1], df["y"].iloc[-1], color=UAV_COLORS[uid], marker='*', s=100, zorder=6)
-        ax_alt.plot(df["t"], -df["z"], color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
+        ax_alt.plot(df["t"], -df["z"], color=UAV_COLORS[uid], lw=1.4, label=UAV_LABELS[uid])
 
+    dp = load("px4_1_swarm_planner_debug.csv")
     if dp is not None:
         ax_xy.plot(dp["payload_position_ned.x"], dp["payload_position_ned.y"],
-                   color=PAYLOAD_COLOR, lw=2.0, ls='--', label="Payload")
+                   color=PAYLOAD_COLOR, lw=1.8, ls='--', label="Payload")
         ax_xy.plot(dp["payload_target_ned.x"], dp["payload_target_ned.y"],
-                   color='black', lw=1.2, ls=':', label="Target")
+                   color='purple', lw=1.0, ls=':', label="Target")
         ax_alt.plot(dp["t"], -dp["payload_position_ned.z"],
-                    color=PAYLOAD_COLOR, lw=2.0, ls='--', label="Payload")
+                    color=PAYLOAD_COLOR, lw=1.8, ls='--', label="Payload")
         ax_alt.plot(dp["t"], -dp["payload_target_ned.z"],
-                    color='black', lw=1.2, ls=':', label="Target")
+                    color='purple', lw=1.0, ls=':', label="Target alt")
 
-    ax_xy.set_title("Top-Down Transport Trajectory", fontsize=13, fontweight='bold')
-    ax_xy.set_xlabel("X (m)")
-    ax_xy.set_ylabel("Y (m)")
-    ax_xy.grid(True, alpha=0.3)
-    ax_xy.set_aspect('equal')
-    ax_xy.legend(fontsize=9, ncol=2)
+    ax_xy.set_xlabel("X NED (m)"); ax_xy.set_ylabel("Y NED (m)")
+    ax_xy.set_title("Top-Down Trajectory (XY)", fontsize=11, fontweight='bold')
+    ax_xy.set_aspect('equal'); ax_xy.grid(True, alpha=0.3)
+    ax_xy.legend(fontsize=8, ncol=2)
 
-    ax_alt.set_title("Altitude Profile", fontsize=13, fontweight='bold')
-    ax_alt.set_xlabel("Time (s)")
-    ax_alt.set_ylabel("Altitude (m)")
-    ax_alt.grid(True, alpha=0.3)
-    ax_alt.legend(fontsize=9, ncol=2)
+    ax_alt.set_xlabel("Time (s)"); ax_alt.set_ylabel("Altitude (m, up+)")
+    ax_alt.set_title("Altitude Profile", fontsize=11, fontweight='bold')
+    ax_alt.grid(True, alpha=0.3); ax_alt.legend(fontsize=8, ncol=2)
 
+    fig.suptitle("Swarm Flight Overview", fontsize=14, fontweight='bold')
     fig.tight_layout()
-    savefig(fig, "paper_01_overview.png", dpi=220)
+    savefig(fig, "01_overview.png")
 
 
-def plot_paper_payload_tracking():
-    print("[P2] Paper payload tracking")
+# ── 2. Payload tracking error ──────────────────────────────────────────────────
+def plot_payload_error():
+    print("[2] Payload tracking error")
     dp = load("px4_1_swarm_planner_debug.csv")
     if dp is None:
         print("   no data, skipping")
@@ -1094,105 +305,379 @@ def plot_paper_payload_tracking():
     ez = dp["payload_position_ned.z"] - dp["payload_target_ned.z"]
     err = np.sqrt(ex**2 + ey**2 + ez**2)
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
-    axes[0].plot(dp["t"], ex, color='#E74C3C', lw=1.4, label='e_x')
-    axes[0].plot(dp["t"], ey, color='#2ECC71', lw=1.4, label='e_y')
-    axes[0].plot(dp["t"], ez, color='#3498DB', lw=1.4, label='e_z')
-    axes[0].axhline(0, color='k', lw=0.7, ls='--')
-    axes[0].set_ylabel("Component error (m)")
-    axes[0].set_title("Payload Tracking Error Components", fontsize=13, fontweight='bold')
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend(fontsize=9, ncol=3)
+    fig, axes = plt.subplots(4, 1, figsize=(14, 11), sharex=True)
+    for ax, data, lbl, col in zip(
+        axes,
+        [ex, ey, ez, err],
+        ["e_x (m)", "e_y (m)", "e_z (m)", "|e| (m)"],
+        [XYZ_COLORS[0], XYZ_COLORS[1], XYZ_COLORS[2], "#8E44AD"],
+    ):
+        ax.plot(dp["t"], data, color=col, lw=1.3)
+        if lbl != "|e| (m)":
+            ax.axhline(0, color='k', lw=0.4, ls='--')
+        else:
+            ax.fill_between(dp["t"], 0, err, color=col, alpha=0.15)
+        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
 
-    axes[1].plot(dp["t"], err, color='#8E44AD', lw=1.8)
-    axes[1].fill_between(dp["t"], 0, err, color='#8E44AD', alpha=0.18)
-    axes[1].set_xlabel("Time (s)")
-    axes[1].set_ylabel(r"$\|e_p\|$ (m)")
-    axes[1].set_title("Payload Position Error Norm", fontsize=13, fontweight='bold')
-    axes[1].grid(True, alpha=0.3)
-
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle("Payload Position Tracking Error", fontsize=14, fontweight='bold')
     fig.tight_layout()
-    savefig(fig, "paper_02_payload_tracking.png", dpi=220)
+    savefig(fig, "02_payload_error.png")
 
 
-def plot_paper_formation_quality():
-    print("[P3] Paper formation quality")
-    dist_series = compute_inter_uav_distance_series()
-    rest_summary = compute_rest_length_error_summary()
-    if not dist_series and rest_summary is None:
-        print("   no data, skipping")
-        return
+# ── 3. Distances: inter-UAV + virtual rest-length error ───────────────────────
+def plot_distances():
+    print("[3] Distances (inter-UAV & virtual structure)")
+    fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=False)
+    ax_uav, ax_virt = axes
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=False)
+    # --- real inter-UAV distances ---
+    dfs = {}
+    for uid in UAV_IDS:
+        df = load_uav_kinematics(uid)
+        if df is not None:
+            dfs[uid] = df
 
-    for label, color, t_common, dist in dist_series:
-        axes[0].plot(t_common, dist, color=color, lw=1.5, label=label)
-    axes[0].set_title("Inter-UAV Distances", fontsize=13, fontweight='bold')
-    axes[0].set_xlabel("Time (s)")
-    axes[0].set_ylabel("Distance (m)")
-    axes[0].grid(True, alpha=0.3)
-    if dist_series:
-        axes[0].legend(fontsize=9, ncol=3)
+    pair_colors = ['#8E44AD', '#16A085', '#D35400']
+    for (i, j), col in zip([(1, 2), (1, 3), (2, 3)], pair_colors):
+        if i not in dfs or j not in dfs:
+            continue
+        a, b = dfs[i], dfs[j]
+        t_c = np.linspace(max(a["t"].min(), b["t"].min()),
+                          min(a["t"].max(), b["t"].max()), 2000)
+        dist = np.sqrt(
+            (np.interp(t_c, a["t"], a["x"]) - np.interp(t_c, b["t"], b["x"]))**2 +
+            (np.interp(t_c, a["t"], a["y"]) - np.interp(t_c, b["t"], b["y"]))**2 +
+            (np.interp(t_c, a["t"], a["z"]) - np.interp(t_c, b["t"], b["z"]))**2
+        )
+        ax_uav.plot(t_c, dist, color=col, lw=1.5, label=f"UAV-{i} ↔ UAV-{j}")
 
-    if rest_summary is not None:
-        t, mean_abs, max_abs = rest_summary
-        axes[1].plot(t, mean_abs, color='#2980B9', lw=1.8, label='mean |Δrest|')
-        axes[1].plot(t, max_abs, color='#C0392B', lw=1.6, label='max |Δrest|')
-        axes[1].fill_between(t, 0, mean_abs, color='#2980B9', alpha=0.12)
-        axes[1].fill_between(t, mean_abs, max_abs, color='#C0392B', alpha=0.08)
-        axes[1].legend(fontsize=9)
+    ax_uav.set_ylabel("Distance (m)")
+    ax_uav.set_xlabel("Time (s)")
+    ax_uav.set_title("Inter-UAV Real Distances", fontsize=11, fontweight='bold')
+    ax_uav.legend(fontsize=9); ax_uav.grid(True, alpha=0.3)
+
+    # --- virtual node rest-length error ---
+    dp = load("px4_1_swarm_planner_debug.csv")
+    needed = [f"rest_lengths[{i}]" for i in range(25)]
+    for i in range(5):
+        for c in ["x", "y", "z"]:
+            needed.append(f"virtual_positions_ned[{i}].{c}")
+
+    if dp is not None and has_columns(dp, *needed):
+        rl = np.array([[dp[f"rest_lengths[{i*5+j}]"].iloc[0] for j in range(5)] for i in range(5)])
+        node_labels = ["1", "2", "3", "U", "L"]
+        pair_list = [(0,1),(0,2),(1,2),(0,3),(0,4),(1,3),(1,4),(2,3),(2,4),(3,4)]
+        cmap = plt.cm.tab10.colors
+        abs_errors = []
+        for k, (i, j) in enumerate(pair_list):
+            ref = rl[i, j]
+            if ref <= 0:
+                continue
+            p_i = virtual_node_position(dp, i)
+            p_j = virtual_node_position(dp, j)
+            actual = np.sqrt((p_i[0]-p_j[0])**2 + (p_i[1]-p_j[1])**2 + (p_i[2]-p_j[2])**2)
+            err = actual - ref
+            lbl = f"{node_labels[i]}↔{node_labels[j]} (r={ref:.2f}m)"
+            ax_virt.plot(dp["t"], err, color=cmap[k % 10], lw=1.0, label=lbl, alpha=0.85)
+            abs_errors.append(np.abs(err))
+        ax_virt.axhline(0, color='k', lw=0.5, ls='--')
+        ax_virt.legend(fontsize=7, ncol=2)
     else:
-        axes[1].text(0.5, 0.5, "rest-length summary not available",
-                     ha='center', va='center', transform=axes[1].transAxes)
-    axes[1].set_title("Virtual Structure Error Summary", fontsize=13, fontweight='bold')
-    axes[1].set_xlabel("Time (s)")
-    axes[1].set_ylabel("Absolute error (m)")
-    axes[1].grid(True, alpha=0.3)
+        ax_virt.text(0.5, 0.5, "virtual structure data not available",
+                     ha='center', va='center', transform=ax_virt.transAxes, fontsize=9)
 
+    ax_virt.set_ylabel("Δ dist − rest_length (m)")
+    ax_virt.set_xlabel("Time (s)")
+    ax_virt.set_title("Virtual Node Rest-Length Error", fontsize=11, fontweight='bold')
+    ax_virt.grid(True, alpha=0.3)
+
+    fig.suptitle("Formation Distances", fontsize=14, fontweight='bold')
     fig.tight_layout()
-    savefig(fig, "paper_03_formation_quality.png", dpi=220)
+    savefig(fig, "03_distances.png")
 
 
-def plot_paper_control_effort():
-    print("[P4] Paper control effort")
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
-    have_acc = False
-    have_thr = False
+# ── 4. Passive forces: spring / damping / friction ────────────────────────────
+def plot_passive_forces():
+    print("[4] Passive forces (spring / damping / friction)")
+    _uav_force_grid(
+        rows_keys=["spring_force", "damping_force", "friction_force"],
+        rows_labels=["spring (N)", "damping (N)", "friction (N)"],
+        title="Passive Network Forces",
+        filename="04_passive_forces.png",
+    )
+
+
+# ── 5. Active forces: tracking / azimuth / rope_compensation ─────────────────
+def plot_active_forces():
+    print("[5] Active forces (tracking_input / azimuth_stab / rope_compensation)")
+    _uav_force_grid(
+        rows_keys=["tracking_input", "azimuth_stabilization_acceleration", "rope_compensation_acceleration"],
+        rows_labels=["tracking input\n(m/s²×m)", "azimuth stab\n(m/s²)", "rope comp\n(m/s²)"],
+        title="Active / Compensation Forces",
+        filename="05_active_forces.png",
+    )
+
+
+# ── 6. Tracking PID breakdown ─────────────────────────────────────────────────
+def plot_tracking_pid():
+    print("[6] Tracking PID breakdown (P / I / D / total)")
+    _uav_force_grid(
+        rows_keys=["tracking_p_term", "tracking_i_term", "tracking_d_term", "tracking_input"],
+        rows_labels=["P term", "I term", "D term", "total"],
+        title="Payload Tracking PID Breakdown",
+        filename="06_tracking_pid.png",
+    )
+
+
+# ── 7. CFO observer internals ─────────────────────────────────────────────────
+def plot_cfo():
+    print("[7] CFO observer (tension / disturbance_hat / compensation)")
+    n_rows = 3
+    fig, axes = plt.subplots(n_rows, 3, figsize=(16, 9), sharex=True)
+    axes = np.atleast_2d(axes)
+
+    for col, uid in enumerate(UAV_IDS):
+        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
+        axes[0, col].set_title(UAV_LABELS[uid], fontweight='bold', fontsize=11)
+        axes[-1, col].set_xlabel("Time (s)")
+
+        # Row 0: estimated rope tension (scalar)
+        ax = axes[0, col]
+        if dp is not None and "estimated_rope_tension_n" in dp.columns:
+            ax.plot(dp["t"], dp["estimated_rope_tension_n"], color="#E74C3C", lw=1.2)
+        else:
+            ax.text(0.5, 0.5, "n/a", ha='center', va='center',
+                    transform=ax.transAxes, fontsize=8, color='gray')
+        ax.grid(True, alpha=0.3)
+        if col == 0:
+            ax.set_ylabel("est. tension (N)", fontsize=9)
+
+        # Row 1: rope_axis_disturbance_hat (scalar, proportional to tension/mass)
+        ax = axes[1, col]
+        if dp is not None and "rope_axis_disturbance_hat" in dp.columns:
+            ax.plot(dp["t"], dp["rope_axis_disturbance_hat"], color="#F39C12", lw=1.2)
+        else:
+            ax.text(0.5, 0.5, "n/a", ha='center', va='center',
+                    transform=ax.transAxes, fontsize=8, color='gray')
+        ax.grid(True, alpha=0.3)
+        if col == 0:
+            ax.set_ylabel("disturbance hat\n(m/s²)", fontsize=9)
+
+        # Row 2: rope_compensation_acceleration xyz
+        ax = axes[2, col]
+        if dp is not None:
+            _plot_xyz_force(ax, dp, "rope_compensation_acceleration")
+        else:
+            ax.text(0.5, 0.5, "no data", ha='center', va='center',
+                    transform=ax.transAxes, fontsize=8, color='gray')
+            ax.grid(True, alpha=0.3)
+        if col == 0:
+            ax.set_ylabel("rope comp\naccel (m/s²)", fontsize=9)
+
+    axes[2, 0].plot([], [], color=XYZ_COLORS[0], lw=1.2, label='x')
+    axes[2, 0].plot([], [], color=XYZ_COLORS[1], lw=1.2, label='y')
+    axes[2, 0].plot([], [], color=XYZ_COLORS[2], lw=1.2, label='z')
+    axes[2, 0].legend(fontsize=8)
+
+    fig.suptitle("CFO Rope Observer", fontsize=13, fontweight='bold')
+    fig.tight_layout()
+    savefig(fig, "07_cfo_observer.png")
+
+
+# ── 8. Desired acceleration + beta ────────────────────────────────────────────
+def plot_desired_accel_beta():
+    print("[8] Desired acceleration + beta")
+    fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
 
     for uid in UAV_IDS:
-        df_acc = load(f"px4_{uid}_swarm_planner_debug.csv")
-        if df_acc is not None and has_columns(df_acc, "desired_acceleration.x", "desired_acceleration.y", "desired_acceleration.z"):
-            mag = np.sqrt(df_acc["desired_acceleration.x"]**2 + df_acc["desired_acceleration.y"]**2 + df_acc["desired_acceleration.z"]**2)
-            axes[0].plot(df_acc["t"], mag, color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
-            have_acc = True
+        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
+        if dp is None:
+            continue
+        col = UAV_COLORS[uid]
+        lbl = UAV_LABELS[uid]
+        if has_columns(dp, "desired_acceleration.x", "desired_acceleration.y", "desired_acceleration.z"):
+            axes[0].plot(dp["t"], dp["desired_acceleration.x"], color=col, lw=1.1, label=lbl)
+            axes[1].plot(dp["t"], dp["desired_acceleration.y"], color=col, lw=1.1)
+            axes[2].plot(dp["t"], dp["desired_acceleration.z"], color=col, lw=1.1)
+        if has_columns(dp, "beta[0]", "beta[1]", "beta[2]"):
+            # Use the UAV's own beta (self_index slot)
+            i = uid - 1
+            axes[3].plot(dp["t"], dp[f"beta[{i}]"], color=col, lw=1.2, label=lbl)
 
-        df_thr = load(f"px4_{uid}_fmu_in_vehicle_attitude_setpoint.csv")
-        if df_thr is not None and has_columns(df_thr, "thrust_body[2]"):
-            axes[1].plot(df_thr["t"], -df_thr["thrust_body[2]"],
-                         color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
-            have_thr = True
+    for ax, lbl in zip(axes, ["a_x (m/s²)", "a_y (m/s²)", "a_z (m/s²)", "beta (self)"]):
+        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3); ax.axhline(0, color='k', lw=0.4, ls='--')
+    axes[0].legend(fontsize=9)
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle("Planner Output: Desired Acceleration & Beta", fontsize=14, fontweight='bold')
+    fig.tight_layout()
+    savefig(fig, "08_desired_accel_beta.png")
 
-    if have_acc:
-        axes[0].legend(fontsize=9, ncol=3)
+
+# ── 9. Status flags ───────────────────────────────────────────────────────────
+def plot_status():
+    print("[9] Status flags")
+    flags = ["structure_locked", "valid"]
+    available = []
+    for flag in flags:
+        if any(
+            (dp := load(f"px4_{uid}_swarm_planner_debug.csv")) is not None and flag in dp.columns
+            for uid in UAV_IDS
+        ):
+            available.append(flag)
+    if not available:
+        print("   no status flags, skipping")
+        return
+
+    fig, axes = plt.subplots(len(available), 1, figsize=(14, 2.8 * len(available) + 1), sharex=True)
+    axes = np.atleast_1d(axes)
+
+    for uid in UAV_IDS:
+        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
+        if dp is None:
+            continue
+        offset = (uid - 1) * 0.08
+        for ax, flag in zip(axes, available):
+            if flag not in dp.columns:
+                continue
+            ax.step(dp["t"], dp[flag].astype(float) + offset, where='post',
+                    color=UAV_COLORS[uid], lw=1.5, label=UAV_LABELS[uid])
+
+    for ax, flag in zip(axes, available):
+        ax.set_ylabel(flag, fontsize=9); ax.grid(True, alpha=0.3)
+    axes[0].legend(fontsize=9, ncol=3)
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle("Swarm Planner Status Flags", fontsize=14, fontweight='bold')
+    fig.tight_layout()
+    savefig(fig, "09_status_flags.png")
+
+
+# ── paper figures ─────────────────────────────────────────────────────────────
+def plot_paper_formation():
+    """Paper Fig 2 – Formation: inter-UAV distances + virtual rest-length error."""
+    print("[paper-2] Formation distances & structure error")
+
+    PAPER_DPI = 300
+    REF_DIST_M = 1.2          # equilateral side length from config
+
+    pair_colors = ['#8E44AD', '#16A085', '#D35400']
+    pair_labels = ["UAV-1 ↔ UAV-2", "UAV-1 ↔ UAV-3", "UAV-2 ↔ UAV-3"]
+
+    # ── panel 1: real inter-UAV distances ──────────────────────────────────────
+    dfs = {}
+    for uid in UAV_IDS:
+        df = load_uav_kinematics(uid)
+        if df is not None:
+            dfs[uid] = df
+
+    has_dist = len(dfs) >= 2
+
+    # ── panel 2: virtual rest-length error (UAV nodes only: 0↔1, 0↔2, 1↔2) ───
+    dp = load("px4_1_swarm_planner_debug.csv")
+    uav_pairs = [(0, 1), (0, 2), (1, 2)]
+    needed_virt = [f"rest_lengths[{i*5+j}]" for i, j in uav_pairs]
+    for i, j in uav_pairs:
+        for c in ["x", "y", "z"]:
+            needed_virt += [f"virtual_positions_ned[{i}].{c}",
+                            f"virtual_positions_ned[{j}].{c}"]
+    has_virt = dp is not None and has_columns(dp, *needed_virt)
+
+    if not has_dist and not has_virt:
+        print("   no formation data, skipping")
+        return
+
+    fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=False)
+    ax_dist, ax_err = axes
+
+    # panel 1
+    if has_dist:
+        for (i, j), col, lbl in zip([(1, 2), (1, 3), (2, 3)], pair_colors, pair_labels):
+            if i not in dfs or j not in dfs:
+                continue
+            a, b = dfs[i], dfs[j]
+            t_c = np.linspace(max(a["t"].min(), b["t"].min()),
+                              min(a["t"].max(), b["t"].max()), 4000)
+            dist = np.sqrt(
+                (np.interp(t_c, a["t"], a["x"]) - np.interp(t_c, b["t"], b["x"]))**2 +
+                (np.interp(t_c, a["t"], a["y"]) - np.interp(t_c, b["t"], b["y"]))**2 +
+                (np.interp(t_c, a["t"], a["z"]) - np.interp(t_c, b["t"], b["z"]))**2
+            )
+            ax_dist.plot(t_c, dist, color=col, lw=1.2, label=lbl)
+        ax_dist.axhline(REF_DIST_M, color='k', lw=0.8, ls='--', label=f"ref {REF_DIST_M} m")
+    ax_dist.set_ylabel("Distance (m)", fontsize=10)
+    ax_dist.set_xlabel("Time (s)", fontsize=10)
+    ax_dist.legend(fontsize=8, ncol=2)
+    ax_dist.grid(True, alpha=0.3)
+    ax_dist.set_title("Inter-UAV Distances", fontsize=11, fontweight='bold')
+
+    # panel 2
+    if has_virt:
+        node_labels = ["1", "2", "3"]
+        for k, (i, j) in enumerate(uav_pairs):
+            ref = dp[f"rest_lengths[{i*5+j}]"].iloc[0]
+            if ref <= 0:
+                continue
+            p_i = virtual_node_position(dp, i)
+            p_j = virtual_node_position(dp, j)
+            actual = np.sqrt(
+                (p_i[0] - p_j[0])**2 +
+                (p_i[1] - p_j[1])**2 +
+                (p_i[2] - p_j[2])**2
+            )
+            err = actual - ref
+            ax_err.plot(dp["t"], err, color=pair_colors[k], lw=1.2,
+                        label=f"{node_labels[i]}↔{node_labels[j]} (r={ref:.2f} m)")
+        ax_err.axhline(0, color='k', lw=0.6, ls='--')
+        ax_err.legend(fontsize=8, ncol=2)
     else:
-        axes[0].text(0.5, 0.5, "desired acceleration not available",
-                     ha='center', va='center', transform=axes[0].transAxes)
-    axes[0].set_ylabel(r"$\|a_d\|$ (m/s$^2$)")
-    axes[0].set_title("Planner Command Magnitude", fontsize=13, fontweight='bold')
-    axes[0].grid(True, alpha=0.3)
-
-    if have_thr:
-        axes[1].legend(fontsize=9, ncol=3)
-    else:
-        axes[1].text(0.5, 0.5, "thrust command not available",
-                     ha='center', va='center', transform=axes[1].transAxes)
-    axes[1].set_xlabel("Time (s)")
-    axes[1].set_ylabel("Normalized thrust")
-    axes[1].set_title("Low-Level Control Effort", fontsize=13, fontweight='bold')
-    axes[1].grid(True, alpha=0.3)
+        ax_err.text(0.5, 0.5, "virtual structure data not available",
+                    ha='center', va='center', transform=ax_err.transAxes,
+                    fontsize=9, color='gray')
+    ax_err.set_ylabel("Δd − rest length (m)", fontsize=10)
+    ax_err.set_xlabel("Time (s)", fontsize=10)
+    ax_err.grid(True, alpha=0.3)
+    ax_err.set_title("Virtual Structure Error (UAV Nodes)", fontsize=11, fontweight='bold')
 
     fig.tight_layout()
-    savefig(fig, "paper_04_control_effort.png", dpi=220)
+    savefig(fig, "paper_02_formation.png", dpi=PAPER_DPI)
+
+
+def plot_paper_cfo():
+    """Paper Fig 3 – CFO rope observer: estimated tension per UAV."""
+    print("[paper-3] CFO rope observer – estimated tension")
+
+    PAPER_DPI = 300
+
+    # Check if any data is available
+    any_data = False
+    for uid in UAV_IDS:
+        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
+        if dp is not None and "estimated_rope_tension_n" in dp.columns:
+            any_data = True
+            break
+    if not any_data:
+        print("   no CFO tension data, skipping")
+        return
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+
+    for uid in UAV_IDS:
+        dp = load(f"px4_{uid}_swarm_planner_debug.csv")
+        if dp is None or "estimated_rope_tension_n" not in dp.columns:
+            continue
+        ax.plot(dp["t"], dp["estimated_rope_tension_n"],
+                color=UAV_COLORS[uid], lw=1.3, label=UAV_LABELS[uid])
+
+    ax.axhline(0, color='k', lw=0.5, ls='--')
+    ax.set_xlabel("Time (s)", fontsize=10)
+    ax.set_ylabel("Estimated Rope Tension (N)", fontsize=10)
+    ax.set_title("CFO: Estimated Rope Tension", fontsize=11, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    savefig(fig, "paper_03_cfo_tension.png", dpi=PAPER_DPI)
+
 
 # ── main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -1202,14 +687,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "analysis_dir",
         type=str,
-        help="Path to the analysis directory (must contain a 'csv' subfolder). "
-             "Plots will be written to analysis_dir/plots/",
+        help="Path to the analysis directory (must contain a 'csv' subfolder).",
     )
     parser.add_argument(
         "--profile",
-        choices=["full", "paper"],
+        choices=["full", "paper", "both"],
         default="full",
-        help="Plot set to generate: full diagnostic set or a compact paper-ready set.",
+        help="full: all 9 diagnostic plots; paper: publication figures (formation + CFO); both: runs full then paper.",
     )
     parser.add_argument(
         "--output-dir",
@@ -1221,55 +705,45 @@ if __name__ == "__main__":
         "--window",
         choices=["full", "valid", "cmd_ctrl"],
         default="full",
-        help="Optional analysis time window: full bag, first common valid pose, or CMD_CTRL only.",
+        help="Time window: full bag, first common valid pose, or CMD_CTRL only.",
     )
     args = parser.parse_args()
     analysis_dir = os.path.abspath(args.analysis_dir)
     if not os.path.isdir(analysis_dir):
         print(f"Error: not a directory: {analysis_dir}", file=sys.stderr)
         sys.exit(1)
-    # set global paths used by helper functions
     CSV_DIR = os.path.join(analysis_dir, "csv")
-    if args.output_dir:
-        OUT_DIR = os.path.abspath(args.output_dir)
-    else:
-        OUT_DIR = os.path.join(analysis_dir, "plots" if args.profile == "full" else "paper_plots")
     if not os.path.isdir(CSV_DIR):
         print(f"Error: CSV folder not found: {CSV_DIR}", file=sys.stderr)
         sys.exit(1)
+
+    if args.output_dir:
+        OUT_DIR = os.path.abspath(args.output_dir)
+    elif args.profile == "paper":
+        OUT_DIR = os.path.join(analysis_dir, "plots_paper")
+    else:
+        OUT_DIR = os.path.join(analysis_dir, "plots")
+
     window_start_s = configure_time_window(args.window)
     os.makedirs(OUT_DIR, exist_ok=True)
     clear_png_outputs()
-    print(f"CSV dir:  {CSV_DIR}")
-    print(f"Output:   {OUT_DIR}\n")
-    print(f"Time origin: global bag start")
-    print(f"Window:     {args.window} (start = {window_start_s:.3f} s)\n")
+    print(f"CSV dir : {CSV_DIR}")
+    print(f"Output  : {OUT_DIR}")
+    print(f"Profile : {args.profile}")
+    print(f"Window  : {args.window} (start = {window_start_s:.3f} s)\n")
+
     if args.profile == "paper":
-        plot_paper_overview()
-        plot_paper_payload_tracking()
-        plot_paper_formation_quality()
-        plot_paper_control_effort()
-        print("\nDone! Paper plots saved to:", OUT_DIR)
+        plot_paper_formation()
+        plot_paper_cfo()
     else:
-        plot_dashboard()
-        plot_3d_trajectory()
-        plot_xy_trajectory()
-        plot_position_time()
-        plot_velocity_time()
-        plot_attitude()
-        plot_attitude_tracking()
-        plot_thrust()
-        plot_inter_uav_distances()
-        plot_payload_tracking_error()
-        plot_desired_acceleration()
-        plot_beta()
-        plot_virtual_positions()
-        plot_control_forces()
-        plot_status_flags()
-        plot_formation_snapshots()
-        plot_speed()
-        plot_altitude()
-        plot_uav_virtual_error()
-        plot_formation_rest_length_error()
-        plot_fsm_tracking()
-        print("\nDone! All plots saved to:", OUT_DIR)
+        plot_overview()
+        plot_payload_error()
+        plot_distances()
+        plot_passive_forces()
+        plot_active_forces()
+        plot_tracking_pid()
+        plot_cfo()
+        plot_desired_accel_beta()
+        plot_status()
+
+    print("\nDone! Plots saved to:", OUT_DIR)

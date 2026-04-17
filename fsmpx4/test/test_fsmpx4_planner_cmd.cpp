@@ -16,8 +16,10 @@
 #include <px4_msgs/msg/vehicle_attitude_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_global_position.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
+#include <swarm_planner/msg/swarm_planner_debug.hpp>
 
 #include "fsmpx4.h"
+#include "param_loader.h"
 #include "swarm_planner/geo_utils.h"
 #include "swarm_planner/planner_core.h"
 
@@ -124,6 +126,11 @@ swarm_planner::control::SwarmPlannerCore::Config makeSwarmConfig()
     cfg.acc_norm_limit_m_s2 = 6.0;
     cfg.integral_limit = 2.0;
     cfg.payload_integral_limit = 2.0;
+    cfg.rope_tension_compensation_enabled = true;
+    cfg.rope_tension_max_n = 10.0;
+    cfg.rope_observer_l1 = 20.0;
+    cfg.rope_observer_l2 = 50.0;
+    cfg.rope_observer_phi = 0.1;
     cfg.rest_lengths_override = restLengths();
     return cfg;
 }
@@ -146,8 +153,10 @@ px4_msgs::msg::VehicleAttitudeSetpoint makeExpectedPlannerOutput()
         kPayloadLatDeg, kPayloadLonDeg, kPayloadAltM, origin);
     input.payload_velocity_ned = swarm_planner::Vector3(kPayloadVx, kPayloadVy, kPayloadVz);
     input.payload_target_ned = swarm_planner::Vector3(0.0, 0.0, -1.0);
+    input.prev_thrust_ned = swarm_planner::Vector3(0.0, 0.0, -input.mass * 9.81);
     input.self_index = 0;
     input.mass = 2.0;
+    input.prev_thrust_valid = true;
 
     swarm_planner::control::SwarmPlannerCore core;
     const auto cfg = makeSwarmConfig();
@@ -261,6 +270,11 @@ protected:
             rclcpp::Parameter("swarm.acc_norm_limit_m_s2", 6.0),
             rclcpp::Parameter("swarm.integral_limit", 2.0),
             rclcpp::Parameter("swarm.payload_integral_limit", 2.0),
+            rclcpp::Parameter("swarm.rope_tension_comp.enabled", true),
+            rclcpp::Parameter("swarm.rope_tension_comp.max_tension_n", 10.0),
+            rclcpp::Parameter("swarm.rope_tension_comp.observer_l1", 20.0),
+            rclcpp::Parameter("swarm.rope_tension_comp.observer_l2", 50.0),
+            rclcpp::Parameter("swarm.rope_tension_comp.observer_phi", 0.1),
             rclcpp::Parameter("swarm.structure_reference.rest_lengths", restLengths()),
         });
 
@@ -298,6 +312,11 @@ protected:
             [this](const fsmpx4::msg::FSMDebug::SharedPtr msg) {
                 debug_messages_.push_back(*msg);
             });
+        swarm_debug_sub_ = io_node_->create_subscription<swarm_planner::msg::SwarmPlannerDebug>(
+            "/swarm_planner/debug", rclcpp::QoS(10).reliable(),
+            [this](const swarm_planner::msg::SwarmPlannerDebug::SharedPtr msg) {
+                swarm_debug_messages_.push_back(*msg);
+            });
 
         executor_.add_node(fsm_);
         executor_.add_node(io_node_);
@@ -308,6 +327,7 @@ protected:
     {
         executor_.remove_node(io_node_);
         executor_.remove_node(fsm_);
+        swarm_debug_sub_.reset();
         debug_sub_.reset();
         output_sub_.reset();
         payload_local_pub_.reset();
@@ -320,6 +340,7 @@ protected:
         rc_pub_.reset();
         io_node_.reset();
         fsm_.reset();
+        swarm_debug_messages_.clear();
         debug_messages_.clear();
         forwarded_.clear();
     }
@@ -378,6 +399,8 @@ protected:
     rclcpp::Publisher<px4_msgs::msg::VehicleLocalPosition>::SharedPtr payload_local_pub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr output_sub_;
     rclcpp::Subscription<fsmpx4::msg::FSMDebug>::SharedPtr debug_sub_;
+    rclcpp::Subscription<swarm_planner::msg::SwarmPlannerDebug>::SharedPtr swarm_debug_sub_;
+    std::vector<swarm_planner::msg::SwarmPlannerDebug> swarm_debug_messages_;
     std::vector<fsmpx4::msg::FSMDebug> debug_messages_;
     std::vector<px4_msgs::msg::VehicleAttitudeSetpoint> forwarded_;
 };
@@ -477,4 +500,56 @@ TEST_F(FSMPX4PlannerCmdTest, DebugTopicCarriesFsmState)
     debug_msg = debug_messages_.back();
     EXPECT_EQ(debug_msg.fsm_state, fsmpx4::msg::FSMDebug::STATE_AUTO_HOVER);
     EXPECT_EQ(debug_msg.fsm_state_name, "AUTO_HOVER");
+}
+
+TEST_F(FSMPX4PlannerCmdTest, SwarmPlannerDebugPublishesObserverInputsAndValidity)
+{
+    publishSelfSensors();
+    publishRc(1.0, -1.0);
+    step();
+    EXPECT_EQ(fsm_->currentState(), fsmpx4::FSMPX4::State::OFFBOARD_STABILIZED);
+
+    publishSelfSensors();
+    publishRc(1.0, 0.2);
+    step();
+    EXPECT_EQ(fsm_->currentState(), fsmpx4::FSMPX4::State::AUTO_HOVER);
+
+    publishSelfSensors();
+    publishSwarmSensors();
+    publishRc(1.0, 1.0);
+    step();
+    EXPECT_EQ(fsm_->currentState(), fsmpx4::FSMPX4::State::CMD_CTRL);
+
+    publishSelfSensors();
+    publishSwarmSensors();
+    publishRc(1.0, 1.0);
+    step();
+
+    ASSERT_FALSE(swarm_debug_messages_.empty());
+    const auto& debug = swarm_debug_messages_.back();
+    EXPECT_TRUE(debug.valid);
+    EXPECT_TRUE(debug.prev_thrust_valid);
+    EXPECT_TRUE(debug.rope_observer_valid);
+    EXPECT_GT(std::abs(debug.prev_thrust_ned.z), 1e-6);
+    EXPECT_GT(
+        std::sqrt(
+            debug.rope_direction_ned.x * debug.rope_direction_ned.x +
+            debug.rope_direction_ned.y * debug.rope_direction_ned.y +
+            debug.rope_direction_ned.z * debug.rope_direction_ned.z),
+        1e-6);
+}
+
+// uav_uav_distance_m 通过 param_loader 正确加载到 core.config
+TEST_F(FSMPX4PlannerCmdTest, ParamLoaderLoadsUavUavDistance)
+{
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({
+        rclcpp::Parameter("swarm.structure_reference.uav_uav_distance_m", 2.1),
+    });
+    auto node = std::make_shared<rclcpp::Node>("param_loader_uav_uav_distance_test", options);
+
+    fsmpx4::param_loader::FSMParams params;
+    ASSERT_TRUE(params.load_from_node(*node));
+
+    EXPECT_NEAR(params.swarm.core.uav_uav_distance_m, 2.1, 1e-9);
 }

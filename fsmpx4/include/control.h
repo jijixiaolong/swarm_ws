@@ -18,7 +18,6 @@ public:
         types::Vector3 kvi{types::Vector3::Zero()};        // 位置积分增益
         double mass{1.0};                    // 质量 kg
         double gravity{9.81};                // 重力 m/s^2
-        types::Vector3 b1d{types::Vector3::UnitX()};  // 航向参考向量（与 b3 正交），由指令提供
         bool use_integral{false};            // 是否启用位置积分
         double integral_limit{1.5};          // 积分限幅
         double hover_thrust_default{0.6};    // 默认悬停油门（归一化）
@@ -39,9 +38,6 @@ public:
                                                         const types::Vector3& desired_acceleration,
                                                         double yaw_desired,
                                                         const types::Vector3& b1d) const;
-
-    types::Quaternion computeDesiredRotation(const types::UAVState& state,
-                                             const types::UAVCommand& cmd) const;
 
     const Config& config() const { return cfg_; }
     bool initialized() const { return initialized_; }

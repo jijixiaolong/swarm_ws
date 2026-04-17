@@ -45,8 +45,6 @@ types::ControlOutput PositionAttitudeController::computeControl(const types::UAV
 {
     if (!initialized_) {
         types::ControlOutput output;
-        output.timestamp = state.timestamp;
-        output.Rd = state.rotation;
         output.qd = types::Quaternion(state.rotation);
         output.qd.normalize();
         return output;
@@ -82,8 +80,6 @@ types::ControlOutput PositionAttitudeController::computeFromDesiredAcceleration(
 {
     if (!initialized_) {
         types::ControlOutput output;
-        output.timestamp = state.timestamp;
-        output.Rd = state.rotation;
         output.qd = types::Quaternion(state.rotation);
         output.qd.normalize();
         return output;
@@ -102,13 +98,11 @@ types::ControlOutput PositionAttitudeController::computeFromA(const types::UAVSt
                                                               const types::Vector3& b1d) const
 {
     types::ControlOutput output;
-    output.timestamp = state.timestamp;
     output.A = A;
     output.thrust_vector = -A;
 
     const double a_norm = A.norm();
     if (a_norm < 1e-6) {
-        output.Rd = state.rotation;
         output.qd = types::Quaternion(state.rotation);
         output.qd.normalize();
         output.thrust = 0.0;
@@ -149,7 +143,6 @@ types::ControlOutput PositionAttitudeController::computeFromA(const types::UAVSt
     types::Quaternion qd(Rd);
     qd.normalize();
 
-    output.Rd = Rd;
     output.qd = qd;
     const double hover_thrust = (std::isfinite(state.hover_thrust) && state.hover_thrust > 0.0)
                                 ? state.hover_thrust
@@ -165,13 +158,6 @@ types::ControlOutput PositionAttitudeController::computeFromA(const types::UAVSt
     output.thrust = -normalized_thrust;
     output.valid = true;
     return output;
-}
-
-
-types::Quaternion PositionAttitudeController::computeDesiredRotation(const types::UAVState& state,
-                                                                     const types::UAVCommand& cmd) const
-{
-    return computeControl(state, cmd).qd;
 }
 
 

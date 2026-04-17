@@ -1,1 +1,20 @@
+# IDE / local config
 .vscode/
+.claude/
+.codex
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Flight data (large rosbag recordings)
+data/
+_autorun_logs/
+
+# Archives / backups
+*.zip
+
+# ROS/colcon build artifacts (if src is inside a workspace)
+/build/
+/install/
+/log/

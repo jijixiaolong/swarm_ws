@@ -8,17 +8,43 @@ bool valid
 geometry_msgs/Vector3 payload_position_ned
 geometry_msgs/Vector3 payload_velocity_ned
 geometry_msgs/Vector3 payload_target_ned
+geometry_msgs/Vector3 desired_payload_velocity
+geometry_msgs/Vector3 prev_thrust_ned
 
 geometry_msgs/Vector3[3] uav_positions_ned
 geometry_msgs/Vector3[3] uav_velocities_ned
+geometry_msgs/Quaternion[3] uav_attitudes
 
 geometry_msgs/Vector3[5] virtual_positions_ned
 geometry_msgs/Vector3[5] virtual_velocities_ned
 float64[3] beta
 float64[25] rest_lengths
 
+geometry_msgs/Vector3 spring_force
+geometry_msgs/Vector3 damping_force
+geometry_msgs/Vector3 friction_force
 geometry_msgs/Vector3 passive_force
+geometry_msgs/Vector3 tracking_p_term
+geometry_msgs/Vector3 tracking_i_term
+geometry_msgs/Vector3 tracking_d_term
 geometry_msgs/Vector3 tracking_input
 geometry_msgs/Vector3 virtual_acceleration
 geometry_msgs/Vector3 mapped_acceleration
+geometry_msgs/Vector3 azimuth_stabilization_acceleration
+geometry_msgs/Vector3 separation_acceleration
+geometry_msgs/Vector3 base_acceleration
+geometry_msgs/Vector3 rope_direction_ned
+geometry_msgs/Vector3 estimated_rope_force_ned
+geometry_msgs/Vector3 rope_compensation_acceleration
+geometry_msgs/Vector3 unclipped_desired_acceleration
 geometry_msgs/Vector3 desired_acceleration
+
+float64 dt_used
+float64 measured_rope_axis_velocity
+float64 observer_input_rope_axis_acceleration
+float64 rope_axis_velocity_hat
+float64 rope_axis_disturbance_hat
+float64 rope_axis_observer_error
+float64 estimated_rope_tension_n
+bool prev_thrust_valid
+bool rope_observer_valid

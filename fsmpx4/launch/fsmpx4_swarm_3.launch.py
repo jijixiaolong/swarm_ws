@@ -20,10 +20,41 @@ UAV_CONFIGS = [
 ]
 
 
+def _px4_state_topics(px4_ns):
+    px4_ns = px4_ns.rstrip('/')
+    return [
+        f'{px4_ns}/fmu/out/manual_control_setpoint',
+        f'{px4_ns}/fmu/out/vehicle_attitude',
+        f'{px4_ns}/fmu/out/vehicle_angular_velocity',
+        f'{px4_ns}/fmu/out/vehicle_command_ack',
+        f'{px4_ns}/fmu/out/vehicle_global_position',
+        f'{px4_ns}/fmu/out/vehicle_land_detected',
+        f'{px4_ns}/fmu/out/vehicle_local_position',
+        f'{px4_ns}/fmu/out/vehicle_odometry',
+        f'{px4_ns}/fmu/out/vehicle_status_v1',
+    ]
+
+
+def _uav_bag_topics(px4_ns):
+    node_namespace = px4_ns.lstrip('/')
+    return [
+        f'/swarm/rviz/{node_namespace}/pose',
+        f'/{node_namespace}/rc/manual_control_setpoint',
+        f'/{node_namespace}/fsmpx4_fsm/debug',
+        f'/{node_namespace}/swarm_planner/debug',
+        f'{px4_ns}/fmu/in/offboard_control_mode',
+        f'{px4_ns}/fmu/in/vehicle_attitude_setpoint',
+        f'{px4_ns}/fmu/in/vehicle_command',
+        *_px4_state_topics(px4_ns),
+    ]
+
+
+def _payload_bag_topics(px4_ns='/px4_4'):
+    return _px4_state_topics(px4_ns)
+
+
 def _bag_topics():
     topics = [
-        '/px4_4/fmu/out/vehicle_global_position',
-        '/px4_4/fmu/out/vehicle_local_position',
         '/swarm/land_trigger',
         '/swarm/cmd_target_ned',
         '/swarm/rviz/cmd_target_pose',
@@ -33,24 +64,9 @@ def _bag_topics():
         '/rc/manual_control_setpoint',
     ]
     for px4_ns, _sys_id, _self_index in UAV_CONFIGS:
-        ns = px4_ns.lstrip('/')
-        topics.extend([
-            f'/swarm/rviz/{ns}/pose',
-            f'/{ns}/rc/manual_control_setpoint',
-            f'/{ns}/fsmpx4_fsm/debug',
-            f'/{ns}/swarm_planner/debug',
-            f'/{ns}/fmu/in/offboard_control_mode',
-            f'/{ns}/fmu/in/vehicle_attitude_setpoint',
-            f'/{ns}/fmu/in/vehicle_command',
-            f'/{ns}/fmu/out/vehicle_attitude',
-            f'/{ns}/fmu/out/vehicle_command_ack',
-            f'/{ns}/fmu/out/vehicle_global_position',
-            f'/{ns}/fmu/out/vehicle_land_detected',
-            f'/{ns}/fmu/out/vehicle_local_position',
-            f'/{ns}/fmu/out/vehicle_odometry',
-            f'/{ns}/fmu/out/vehicle_status_v1',
-        ])
-    return topics
+        topics.extend(_uav_bag_topics(px4_ns))
+    topics.extend(_payload_bag_topics())
+    return sorted(set(topics))
 
 
 def _maybe_start_bag_recording(context, *_args, **_kwargs):

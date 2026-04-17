@@ -66,20 +66,22 @@ private:
     bool positionReady(const rclcpp::Time& now);
     bool buildSwarmInput(
         const rclcpp::Time& now,
-        swarm_planner::control::SwarmPlannerCore::Input& input,
-        std::string* reason = nullptr) const;
+        swarm_planner::control::SwarmPlannerCore::Input& input);
     bool landDetectedReady(const rclcpp::Time& now) const;
     void fallbackToManual(const char* reason);
     /// 检查编队质量是否满足切换到 PAYLOAD_TRACK 的条件
+    /// 基于真实 UAV-UAV 间距与 yaml 配置的 uav_uav_distance_m 比较，
+    /// 不依赖 planner 内部 debug 数据。
     bool checkFormationQuality(
-        const swarm_planner::control::SwarmPlannerCore::DebugState& dbg,
+        const std::array<swarm_planner::Vector3, swarm_planner::kNumUavs>& uav_positions_ned,
+        double side,
         const rclcpp::Time& now);
 
     // ── PX4 communication ──
     void publishOffboardMode(bool use_attitude);
     void publishAttitudeCommand(const types::Quaternion& attitude, double thrust, const rclcpp::Time& stamp);
     void publishVehicleCommand(uint16_t command, float param1 = 0.0f, float param2 = 0.0f);
-    bool toggleOffboardMode(bool on_off);
+    void toggleOffboardMode(bool on_off);
     void publishDebugMessage(const rclcpp::Time& stamp);
     void publishSwarmDebugMessage(
         const rclcpp::Time& stamp,
@@ -109,6 +111,7 @@ private:
     control::PositionAttitudeController controller_;
     std::shared_ptr<types::UAVState> current_state_;
     types::ControlOutput output_;
+    types::ControlOutput prev_control_output_;
     types::UAVCommand cmd_;
     SwarmState swarm_state_{};
     swarm_planner::control::SwarmPlannerCore swarm_core_{};
@@ -137,6 +140,8 @@ private:
                swarm_planner::kNumUavs - 1> uav_global_subs_{};
     std::array<rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr,
                swarm_planner::kNumUavs - 1> uav_local_subs_{};
+    std::array<rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr,
+               swarm_planner::kNumUavs - 1> uav_attitude_subs_{};
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr load_global_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr load_local_sub_;
     rclcpp::TimerBase::SharedPtr control_timer_;

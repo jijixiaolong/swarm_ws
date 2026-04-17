@@ -85,15 +85,12 @@ struct FSMParams
         std::string payload_global_position_topic;
         std::string payload_local_position_topic;
         double data_timeout_s;
-        double rope_length_m;
-        double rope_taut_fraction;
         swarm_planner::control::SwarmPlannerCore::Config core;
 
         /// 编队收敛门控：进入 PAYLOAD_TRACK 前先让弹簧网络收敛
         struct FormationGate {
             bool   enabled{true};
-            double beta_min{0.90};        ///< 所有 beta[i] 须达到此值
-            double struct_err_max{0.20};  ///< UAV–anchor 距离相对误差上限
+            double struct_err_max{0.20};  ///< 3 条虚拟 UAV-UAV 边距离的相对误差上限
             double hold_duration_s{1.0};  ///< 连续满足后需再保持多久
         } formation_gate;
     } swarm;
